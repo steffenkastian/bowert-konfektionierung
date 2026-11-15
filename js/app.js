@@ -6,7 +6,7 @@ import {
   $, $$, esc, norm, natCmp, locCmp, matcher, plural, formatDate, toast, icon, attachSuggest,
 } from './ui.js';
 
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.1.0';
 const PREFS_KEY = 'konf.ui';
 const LIST_LIMIT = 40;
 const CODE_ATTRS = 'autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false"';
@@ -16,7 +16,7 @@ const CODE_ATTRS = 'autocomplete="off" autocapitalize="characters" autocorrect="
 // ======================================================================
 
 const prefs = (() => {
-  const defaults = { recent: [], numericSearch: false, materialSort: 'location' };
+  const defaults = { recent: [], numericSearch: false, materialSort: 'location', orderFilter: 'alle' };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') };
   } catch {
@@ -243,6 +243,19 @@ const locBadge = (loc) =>
 
 const materialTitle = (m) => m.description || `Nr. ${m.nr}`;
 
+// Auftragsstatus
+const STATUS_LABEL = { neu: 'Nicht begonnen', arbeit: 'In Arbeit', fertig: 'Abgeschlossen' };
+const STATUS_RANK = { arbeit: 0, neu: 1, fertig: 2 };
+const statusPill = (o) => {
+  const s = store.orderStatus(o);
+  return `<span class="status st-${s}">${STATUS_LABEL[s]}</span>`;
+};
+const statusSeg = (current) => `<div class="seg status-seg" role="group" aria-label="Status">
+  ${store.ORDER_STATUSES.map((s) => `<button type="button" class="st-${s}" data-status="${s}" aria-pressed="${s === current}">${STATUS_LABEL[s]}</button>`).join('')}
+</div>`;
+const byStatusThenNewest = (a, b) => STATUS_RANK[store.orderStatus(a)] - STATUS_RANK[store.orderStatus(b)]
+  || (b.createdAt || '').localeCompare(a.createdAt || '');
+
 /** Listenzeile; title/sub/tag werden bereits escaped übergeben. */
 function row({ href, title, sub = '', tag = '' }) {
   return `<li><a class="row" href="${href}">
@@ -295,7 +308,7 @@ function orderCard(o, { primary = false } = {}) {
   return `<article class="card">
     <a class="card-head" href="#/auftrag/${o.id}"${primary ? ' data-primary' : ''}>
       <span class="card-head-main">
-        <span class="eyebrow">Auftrag</span>
+        <span class="eyebrow-row"><span class="eyebrow">Auftrag</span>${statusPill(o)}</span>
         <span class="card-title">${esc(o.nr)}</span>
         ${o.note ? `<span class="card-sub">${esc(o.note)}</span>` : ''}
       </span>${icon.chevron}
@@ -324,8 +337,8 @@ function orderRow(o) {
   return row({
     href: `#/auftrag/${o.id}`,
     title: esc(o.nr),
-    sub: esc(sub),
-    tag: a ? '' : '<span class="tag">kein Artikel</span>',
+    sub: a ? esc(sub) : `<span class="warn-text">kein Artikel</span>${o.note ? ` · ${esc(o.note)}` : ''}`,
+    tag: statusPill(o),
   });
 }
 
@@ -536,7 +549,8 @@ function searchHome() {
       <a class="btn btn-primary btn-block" href="#/auftrag/neu">${icon.plus}<span>Ersten Auftrag anlegen</span></a>
     </div>`;
   }
-  const recent = prefs.recent.map(store.getOrder).filter(Boolean);
+  const working = store.orders().filter((o) => store.orderStatus(o) === 'arbeit').sort(byStatusThenNewest);
+  const recent = prefs.recent.map(store.getOrder).filter((o) => o && store.orderStatus(o) !== 'arbeit').slice(0, 5);
   const open = store.orderlist().filter((e) => e.status === 'offen');
   const noMaterial = store.articles().filter((a) => !(a.materialIds || []).length).length;
   const noLocation = store.materials().filter((m) => !m.location).length;
@@ -546,9 +560,9 @@ function searchHome() {
     noLocation && row({ href: '#/material?offen=1', title: esc(`${plural(noLocation, 'Material', 'Materialien')} ohne Lagerort`), sub: 'Lagerort eintragen' }),
   ].filter(Boolean);
   return `
-    ${recent.length
-      ? `${sectionTitle('Zuletzt angesehen')}<ul class="card list">${recent.map(orderRow).join('')}</ul>`
-      : '<p class="hint center">Auftragsnummer, Artikelbezeichnung, Artikelnummer oder Lagerort eintippen.</p>'}
+    ${working.length ? `${sectionTitle('In Arbeit', working.length)}<ul class="card list">${working.map(orderRow).join('')}</ul>` : ''}
+    ${recent.length ? `${sectionTitle('Zuletzt angesehen')}<ul class="card list">${recent.map(orderRow).join('')}</ul>` : ''}
+    ${!working.length && !recent.length ? '<p class="hint center">Auftragsnummer, Artikelbezeichnung, Artikelnummer oder Lagerort eintippen.</p>' : ''}
     ${todo.length ? `${sectionTitle('Zu erledigen')}<ul class="card list">${todo.join('')}</ul>` : ''}
     <a class="btn btn-secondary btn-block" href="#/auftrag/neu">${icon.plus}<span>Neuer Auftrag</span></a>`;
 }
@@ -561,20 +575,33 @@ function viewOrders() {
   return {
     title: 'Aufträge',
     tab: 'auftraege',
-    html: `${filterField('Aufträge filtern …', 'auftraege')}<div id="list"></div>
+    html: `${filterField('Aufträge filtern …', 'auftraege')}<div class="chips-row" id="status-filter"></div><div id="list"></div>
       <a class="fab" href="#/auftrag/neu" aria-label="Neuer Auftrag">${icon.plus}</a>`,
     mount(root) {
       const draw = () => {
         const q = state.filter.auftraege;
         const m = matcher(q);
-        let list = store.orders().sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        const all = store.orders();
+        const count = (s) => all.filter((o) => s === 'alle' || store.orderStatus(o) === s).length;
+        const current = prefs.orderFilter || 'alle';
+        $('#status-filter', root).innerHTML = ['alle', ...store.ORDER_STATUSES].map((s) => `
+          <button type="button" class="chip-btn${s !== 'alle' ? ` st-${s}` : ''}" data-filter="${s}" aria-pressed="${s === current}">
+            ${s === 'alle' ? 'Alle' : STATUS_LABEL[s]} <b>${count(s)}</b></button>`).join('');
+        let list = all.filter((o) => current === 'alle' || store.orderStatus(o) === current).sort(byStatusThenNewest);
         if (q.trim()) list = list.filter((o) => m(o.nr) || m(o.note) || m(store.getArticle(o.articleId)?.name));
         $('#list', root).innerHTML = list.length
           ? `<ul class="card list">${list.map(orderRow).join('')}</ul>`
-          : store.orders().length
+          : all.length
             ? emptyBox('Keine Treffer', 'Filter anpassen oder löschen.')
             : emptyBox('Noch keine Aufträge', 'Tippe auf <b>+</b>, um den ersten Auftrag anzulegen.');
       };
+      $('#status-filter', root).addEventListener('click', (e) => {
+        const b = e.target.closest('[data-filter]');
+        if (!b) return;
+        prefs.orderFilter = b.dataset.filter;
+        savePrefs();
+        draw();
+      });
       bindFilter(root, 'auftraege', draw);
       draw();
       return draw;
@@ -598,10 +625,19 @@ function viewOrder(id) {
         <div class="detail-title">${esc(o.nr)}</div>
         ${o.note ? `<div class="detail-sub">${esc(o.note)}</div>` : ''}
       </div>
+      ${statusSeg(store.orderStatus(o))}
       ${a ? `<div class="card">${articleBlock(a)}</div>
         <a class="btn btn-secondary btn-block" href="#/artikel/${a.id}/material/neu">${icon.plus}<span>Material zu „${esc(a.name)}“ hinzufügen</span></a>`
         : emptyBox('Kein Artikel zugeordnet', 'Ordne dem Auftrag eine Artikelbezeichnung zu.',
           `<a class="btn btn-primary" href="#/auftrag/${o.id}/bearbeiten">Artikel zuordnen</a>`)}`,
+    mount(root) {
+      $('.status-seg', root).addEventListener('click', (e) => {
+        const b = e.target.closest('[data-status]');
+        if (!b) return;
+        store.setOrderStatus(o.id, b.dataset.status);
+        toast(`Auftrag ${o.nr}: ${STATUS_LABEL[b.dataset.status]}`);
+      });
+    },
   };
 }
 
@@ -622,6 +658,7 @@ function viewOrderEdit(id, query) {
         ${field({ id: 'art', label: 'Artikelbezeichnung', value: currentArticle?.name, placeholder: 'suchen, z. B. 5er oder 200er', attrs: 'autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="next"', suggest: true })}
         <div id="art-preview"></div>
         ${field({ id: 'note', label: 'Notiz', optional: true, value: o?.note, placeholder: 'z. B. Kunde, Menge', attrs: 'autocomplete="off" enterkeyhint="done"' })}
+        <div class="field"><span class="label">Status</span>${statusSeg(store.orderStatus(o))}</div>
         <p class="form-error" id="err" role="alert"></p>
         <button class="btn btn-primary btn-block" type="submit">Speichern</button>
       </form>
@@ -665,10 +702,19 @@ function viewOrderEdit(id, query) {
       art.addEventListener('input', preview);
       nextOnEnter(nr, art, note);
 
+      let status = store.orderStatus(o);
+      const seg = $('.status-seg', root);
+      seg.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-status]');
+        if (!b) return;
+        status = b.dataset.status;
+        $$('[data-status]', seg).forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+      });
+
       $('#f', root).addEventListener('submit', (e) => {
         e.preventDefault();
         try {
-          const saved = store.saveOrder({ id: o?.id, nr: nr.value, note: note.value, articleName: art.value });
+          const saved = store.saveOrder({ id: o?.id, nr: nr.value, note: note.value, articleName: art.value, status });
           toast('Auftrag gespeichert');
           if (o) back(`#/auftrag/${saved.id}`);
           else replace(`#/auftrag/${saved.id}`);

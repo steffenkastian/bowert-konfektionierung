@@ -1,7 +1,8 @@
 // Datenhaltung: Firebase Firestore (online, für alle Mitarbeiter gemeinsam, mit Offline-Cache).
 //
 // Struktur:
-//   orders/{id}     { nr, articleId, note }               Auftragsnummer → eine Artikelbezeichnung
+//   orders/{id}     { nr, articleId, note, status }       Auftragsnummer → eine Artikelbezeichnung
+//                   status: „neu“ (nicht begonnen) | „arbeit“ (in Arbeit) | „fertig“ (abgeschlossen)
 //   articles/{id}   { name, materialIds: [] }             Artikelbezeichnung (z. B. „5er“) → Materialien
 //   materials/{id}  { nr, description, location }         Artikelnummer + optionale Beschreibung/Lagerort
 //   orderlist/{id}  { materialId, qty, status }           Bestellliste: status „offen“ | „bestellt“
@@ -108,7 +109,26 @@ export const isEmpty = () => !data.orders.size && !data.articles.size && !data.m
 // ---------- Aufträge ----------
 
 /** Speichert einen Auftrag. Eine noch unbekannte Artikelbezeichnung wird dabei neu angelegt. */
-export function saveOrder({ id, nr, note, articleName }) {
+export const ORDER_STATUSES = ['neu', 'arbeit', 'fertig'];
+export const orderStatus = (o) => (ORDER_STATUSES.includes(o?.status) ? o.status : 'neu');
+
+/** Zeitstempel zum Status merken (z. B. für eine spätere Tagesübersicht). */
+const statusStamps = (status) => ({
+  status,
+  ...(status === 'arbeit' ? { startedAt: now() } : {}),
+  ...(status === 'fertig' ? { doneAt: now() } : {}),
+});
+
+export function setOrderStatus(id, status) {
+  const o = getOrder(id);
+  if (!o || !ORDER_STATUSES.includes(status) || orderStatus(o) === status) return;
+  const fields = { ...statusStamps(status), updatedAt: now() };
+  run(updateDoc(doc(db, 'orders', id), fields));
+  Object.assign(o, fields);
+  emit();
+}
+
+export function saveOrder({ id, nr, note, articleName, status = 'neu' }) {
   nr = str(nr);
   articleName = str(articleName);
   if (!nr) throw new Error('Bitte eine Auftragsnummer eingeben.');
@@ -126,6 +146,8 @@ export function saveOrder({ id, nr, note, articleName }) {
   const orderId = id || newId('orders');
   const fields = { nr, note: str(note), articleId: article.id, updatedAt: now() };
   if (!id) fields.createdAt = now();
+  if (!ORDER_STATUSES.includes(status)) status = 'neu';
+  if (!id || orderStatus(getOrder(id)) !== status) Object.assign(fields, statusStamps(status));
   batch.set(doc(db, 'orders', orderId), fields, { merge: true });
   data.orders.set(orderId, { ...data.orders.get(orderId), id: orderId, ...fields });
   run(batch.commit());

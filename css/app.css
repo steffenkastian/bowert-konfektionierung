@@ -520,6 +520,52 @@ main > .btn-block { margin-top: 12px; }
 .spinner.small { width: 14px; height: 14px; border-width: 2px; border-color: rgb(255 255 255 / 35%); border-top-color: #fff; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ---------- Auftragsstatus ---------- */
+
+:root {
+  --st-neu-bg: #ebe9e5; --st-neu-ink: #5b5662;
+  --st-arbeit-bg: #dceafc; --st-arbeit-ink: #1652a6; --st-arbeit-solid: #1c6dd0;
+  --st-fertig-bg: #e1eedf; --st-fertig-ink: #2f5a33; --st-fertig-solid: #517b54;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --st-neu-bg: #2f2b35; --st-neu-ink: #bdb7c4;
+    --st-arbeit-bg: #182c47; --st-arbeit-ink: #8cbcf5; --st-arbeit-solid: #2f7fdc;
+    --st-fertig-bg: #1f3222; --st-fertig-ink: #9cc79f; --st-fertig-solid: #517b54;
+  }
+}
+.status {
+  flex: none; display: inline-block; padding: 3px 9px; border-radius: 999px;
+  font-size: 12px; font-weight: 750; white-space: nowrap; letter-spacing: 0;
+}
+.status.st-neu { background: var(--st-neu-bg); color: var(--st-neu-ink); }
+.status.st-arbeit { background: var(--st-arbeit-bg); color: var(--st-arbeit-ink); }
+.status.st-fertig { background: var(--st-fertig-bg); color: var(--st-fertig-ink); }
+.eyebrow-row { display: flex; align-items: center; gap: 8px; }
+
+.status-seg button { font-size: 14px; line-height: 1.15; padding: 4px; }
+.status-seg button.st-neu[aria-pressed="true"] { background: var(--st-neu-ink); color: #fff; }
+.status-seg button.st-arbeit[aria-pressed="true"] { background: var(--st-arbeit-solid); color: #fff; }
+.status-seg button.st-fertig[aria-pressed="true"] { background: var(--st-fertig-solid); color: #fff; }
+@media (prefers-color-scheme: dark) {
+  .status-seg button.st-neu[aria-pressed="true"] { color: #1d1a22; }
+}
+.field > .label { display: block; margin-bottom: 6px; font-size: 15px; font-weight: 650; }
+.field .status-seg { margin-bottom: 0; }
+
+.chips-row { display: flex; flex-wrap: wrap; gap: 6px; margin: -2px 0 12px; }
+.chip-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 38px; padding: 0 12px; border-radius: 999px;
+  border: 1.5px solid var(--line-strong); background: var(--surface); color: var(--ink);
+  font: inherit; font-size: 14px; font-weight: 650; cursor: pointer;
+}
+.chip-btn b { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.chip-btn[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+.chip-btn[aria-pressed="true"] b { color: inherit; opacity: 0.75; }
+.chip-btn.st-arbeit[aria-pressed="true"] { background: var(--st-arbeit-solid); border-color: var(--st-arbeit-solid); color: #fff; }
+.chip-btn.st-fertig[aria-pressed="true"] { background: var(--st-fertig-solid); border-color: var(--st-fertig-solid); color: #fff; }
+
 /* ---------- Bestellliste ---------- */
 
 .ol { list-style: none; padding: 0; }
