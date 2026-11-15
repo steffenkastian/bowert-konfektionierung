@@ -52,13 +52,21 @@ export function daysSince(iso) {
 }
 
 let toastTimer = 0;
-export function toast(message, kind = 'ok') {
+/** Kurzer Hinweis unten. Optional mit Aktion, z. B. { label: 'Rückgängig', run: () => … }. */
+export function toast(message, kind = 'ok', action = null) {
   const el = document.getElementById('toast');
-  el.textContent = message;
+  el.innerHTML = `<span>${esc(message)}</span>${action ? `<button type="button">${esc(action.label)}</button>` : ''}`;
   el.dataset.kind = kind;
+  el.classList.toggle('has-action', Boolean(action));
   el.classList.add('show');
+  if (action) {
+    el.querySelector('button').onclick = () => {
+      el.classList.remove('show');
+      action.run();
+    };
+  }
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), kind === 'error' ? 5000 : 2200);
+  toastTimer = setTimeout(() => el.classList.remove('show'), kind === 'error' ? 5000 : action ? 4000 : 2200);
 }
 
 // ---------- Icons (inline SVG, Strich-Stil) ----------
@@ -80,7 +88,14 @@ export const icon = {
   upload: svg('<path d="M12 20V9M7 14l5-5 5 5M5 4h14"/>'),
   logout: svg('<path d="M10 17l5-5-5-5M15 12H3M13 4h6v16h-6"/>'),
   info: svg('<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/>'),
-  phone: svg('<rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/>'),
+  take: svg('<path d="M4 8h16v12H4z"/><path d="M4 8l2-4h12l2 4M12 17v-6M9.5 13.5 12 11l2.5 2.5"/>'),
+  cart: svg('<path d="M3 4h2l2.4 11h10.2L20 7H6.2"/><circle cx="9" cy="19.5" r="1.4"/><circle cx="17" cy="19.5" r="1.4"/>'),
+  gear: svg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
+  share: svg('<path d="M12 3v12M7.5 7.5 12 3l4.5 4.5M5 12v8h14v-8"/>'),
+  check: svg('<path d="m5 12.5 4.5 4.5L19 7.5"/>'),
+  minus: svg('<path d="M5 12h14"/>'),
+  undo: svg('<path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>'),
+  cloudOff: svg('<path d="m3 3 18 18M8.5 8.6A5 5 0 0 0 6.5 18H17m3.4-1.7A4 4 0 0 0 17 10h-.6A6 6 0 0 0 10 6.3"/>'),
 };
 
 // ---------- Vorschlagsliste unter Eingabefeldern ----------

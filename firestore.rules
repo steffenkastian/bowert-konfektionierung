@@ -1,0 +1,17 @@
+rules_version = '2';
+
+// Nur das gemeinsame Konfektionierungs-Konto (Passwort-Login in der App) darf lesen und schreiben.
+// Wichtig: Die E-Mail-Prüfung verhindert, dass jemand mit einem selbst angelegten Konto zugreift.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isTeam() {
+      return request.auth != null
+        && request.auth.token.email == 'konfektionierung@bowert-gmbh.de';
+    }
+
+    match /{collection}/{id} {
+      allow read, write: if isTeam()
+        && collection in ['orders', 'articles', 'materials', 'orderlist'];
+    }
+  }
+}

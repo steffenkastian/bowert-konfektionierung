@@ -1,15 +1,12 @@
-// BO-WERT Konfektionierung – Auftrag → Artikel → Verpackungsmaterial mit Lagerort.
+// BO-WERT Konfektionierung
+// Auftragsnummer → Artikelbezeichnung → Materialien (Artikelnummer, Beschreibung, Lagerort) + Bestellliste.
 
 import * as store from './store.js';
 import {
-  $, $$, esc, norm, natCmp, locCmp, matcher, qtyLabel, plural,
-  formatDate, daysSince, toast, icon, attachSuggest,
+  $, $$, esc, norm, natCmp, locCmp, matcher, plural, formatDate, toast, icon, attachSuggest,
 } from './ui.js';
 
-const APP_VERSION = '1.0.0';
-// SHA-256 des Passworts. Achtung: reiner Sichtschutz – auf GitHub Pages ist der Code öffentlich.
-const PASS_HASH = '105664c1c5f377a29af73aa479297afe1e02b6cf8cf7925ae468729aa47f5837';
-const AUTH_KEY = 'konf.auth';
+const APP_VERSION = '2.0.0';
 const PREFS_KEY = 'konf.ui';
 const LIST_LIMIT = 40;
 const CODE_ATTRS = 'autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false"';
@@ -19,7 +16,7 @@ const CODE_ATTRS = 'autocomplete="off" autocapitalize="characters" autocorrect="
 // ======================================================================
 
 const prefs = (() => {
-  const defaults = { recent: [], numericSearch: false, orderMode: 'artikel', materialSort: 'location' };
+  const defaults = { recent: [], numericSearch: false, materialSort: 'location' };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') };
   } catch {
@@ -39,68 +36,57 @@ function rememberOrder(id) {
 const state = { query: '', filter: { auftraege: '', artikel: '', material: '' } };
 
 // ======================================================================
-// Login
+// Anmeldung (Firebase Auth – das Passwort wird vom Server geprüft)
 // ======================================================================
 
-let sessionAuthed = false;
-
-async function sha256(text) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-function isAuthed() {
-  if (sessionAuthed) return true;
-  try { return localStorage.getItem(AUTH_KEY) === PASS_HASH; } catch { return false; }
+function showScreen(name) {
+  $('#splash').hidden = name !== 'splash';
+  $('#login').hidden = name !== 'login';
+  $('#app').hidden = name !== 'app';
 }
 
 function showLogin() {
-  $('#app').hidden = true;
-  $('#login').hidden = false;
+  showScreen('login');
   $('#pw').value = '';
-  $('#login-msg').textContent = '';
   $('#pw').focus();
 }
 
-function showApp() {
-  $('#login').hidden = true;
-  $('#app').hidden = false;
-  // Bittet den Browser, die Daten nicht automatisch zu löschen.
-  navigator.storage?.persist?.().catch(() => {});
-  render();
-}
+const AUTH_ERRORS = {
+  'auth/invalid-credential': 'Das Passwort stimmt nicht.',
+  'auth/invalid-login-credentials': 'Das Passwort stimmt nicht.',
+  'auth/wrong-password': 'Das Passwort stimmt nicht.',
+  'auth/user-not-found': 'Das Team-Konto ist noch nicht eingerichtet.',
+  'auth/network-request-failed': 'Keine Internetverbindung. Für die Anmeldung wird einmal Internet gebraucht.',
+  'auth/too-many-requests': 'Zu viele Versuche. Bitte kurz warten.',
+  'auth/operation-not-allowed': 'Die Anmeldung ist in Firebase noch nicht aktiviert.',
+  'auth/configuration-not-found': 'Die Anmeldung ist in Firebase noch nicht aktiviert.',
+};
 
 $('#login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const pw = $('#pw');
   const msg = $('#login-msg');
-  let ok = false;
+  const button = $('#login-form button[type=submit]');
+  msg.textContent = '';
+  button.disabled = true;
   try {
-    // Klein geschrieben vergleichen – Handy-Tastaturen schreiben gern „Bowert“.
-    ok = (await sha256(pw.value.trim().toLowerCase())) === PASS_HASH;
-  } catch {
-    msg.textContent = 'Anmeldung nicht möglich: Die Seite muss über https geöffnet werden.';
-    return;
-  }
-  if (!ok) {
-    msg.textContent = 'Das Passwort stimmt nicht.';
+    // Klein geschrieben – Handy-Tastaturen schreiben gern „Bowert“.
+    await store.login(pw.value.trim().toLowerCase());
+    pw.blur();
+  } catch (ex) {
+    msg.textContent = AUTH_ERRORS[ex.code] || `Anmeldung fehlgeschlagen (${ex.code || ex.message}).`;
     pw.select();
     const card = $('.login-card');
     card.classList.remove('shake');
     void card.offsetWidth;
     card.classList.add('shake');
-    return;
+  } finally {
+    button.disabled = false;
   }
-  sessionAuthed = true;
-  try { localStorage.setItem(AUTH_KEY, PASS_HASH); } catch { /* dann nur für diese Sitzung */ }
-  pw.blur();
-  showApp();
 });
 
-function logout() {
-  sessionAuthed = false;
-  try { localStorage.removeItem(AUTH_KEY); } catch { /* egal */ }
-  showLogin();
+async function logout() {
+  await store.logout();
 }
 
 // ======================================================================
@@ -109,8 +95,8 @@ function logout() {
 
 let stack = [];
 let pendingReplace = false;
-let navWasBack = false;
 let renderedHash = null;
+let currentView = null;
 const scrollPos = new Map();
 
 const currentHash = () => location.hash || '#/suche';
@@ -130,18 +116,18 @@ function back(fallback) {
 function onHashChange() {
   if (renderedHash) scrollPos.set(renderedHash, window.scrollY);
   const h = currentHash();
-  navWasBack = false;
+  let wasBack = false;
   if (pendingReplace) {
     stack[stack.length - 1] = h;
     pendingReplace = false;
   } else if (stack.length > 1 && stack[stack.length - 2] === h) {
     stack.pop();
-    navWasBack = true;
+    wasBack = true;
   } else {
     stack.push(h);
   }
   render();
-  window.scrollTo(0, navWasBack ? scrollPos.get(h) || 0 : 0);
+  window.scrollTo(0, wasBack ? scrollPos.get(h) || 0 : 0);
 }
 
 const ID = '([^/?]+)';
@@ -154,37 +140,43 @@ const routes = [
   [route(`auftrag/${ID}/bearbeiten`), (id) => viewOrderEdit(id)],
   [route(`auftrag/${ID}`), (id) => viewOrder(id)],
   [route(`artikel${Q}`), (q) => viewArticles(q)],
-  [route('artikel/neu'), () => viewArticleEdit(null)],
+  [route(`artikel/neu${Q}`), (q) => viewArticleEdit(null, q)],
   [route(`artikel/${ID}/bearbeiten`), (id) => viewArticleEdit(id)],
-  [route(`artikel/${ID}/material/neu`), (aid) => viewItemEdit(aid, null)],
-  [route(`artikel/${ID}/material/${ID}`), (aid, mid) => viewItemEdit(aid, mid)],
+  [route(`artikel/${ID}/material/neu`), (id) => viewAddMaterial(id)],
   [route(`artikel/${ID}`), (id) => viewArticle(id)],
   [route(`material${Q}`), (q) => viewMaterials(q)],
-  [route('material/neu'), () => viewMaterialEdit(null)],
-  [route(`material/${ID}`), (id) => viewMaterialEdit(id)],
+  [route('material/neu'), () => viewMaterial(null)],
+  [route(`material/${ID}${Q}`), (id, q) => viewMaterial(id, q)],
+  [route('bestellliste'), () => viewOrderList()],
   [route('mehr'), () => viewMore()],
 ];
 
 function render() {
-  if (!isAuthed()) { showLogin(); return; }
+  if ($('#app').hidden) return;
   const h = currentHash();
   let view = null;
-  for (const [re, make] of routes) {
-    const m = h.match(re);
-    if (m) { view = make(...m.slice(1)); break; }
+  if (!store.isReady()) {
+    view = { title: 'Konfektionierung', loading: true, html:'<div class="loading"><span class="spinner"></span>Daten werden geladen …</div>' };
+  } else {
+    for (const [re, make] of routes) {
+      const m = h.match(re);
+      if (m) { view = make(...m.slice(1)); break; }
+    }
   }
   mount(view || notFound());
   renderedHash = h;
 }
 
 function mount(view) {
+  currentView = view;
   $('#title').textContent = view.title;
   document.title = `${view.title} · Konfektionierung`;
   const backBtn = $('#back');
   backBtn.hidden = !view.back;
   backBtn.onclick = () => back(view.back);
   $('#brand').hidden = Boolean(view.back);
-  $('#topbar-action').innerHTML = view.action || '';
+  $('#topbar-action').innerHTML = view.action
+    ?? (view.back ? '' : `<a class="icon-btn" href="#/mehr" aria-label="Mehr: Datensicherung, Abmelden" title="Mehr">${icon.gear}</a>`);
   const main = $('#main');
   main.innerHTML = view.html;
   for (const tab of $$('.tab')) {
@@ -192,15 +184,56 @@ function mount(view) {
     tab.classList.toggle('active', active);
     if (active) tab.setAttribute('aria-current', 'page'); else tab.removeAttribute('aria-current');
   }
-  view.mount?.(main);
+  const onData = view.mount?.(main);
+  view.onData = typeof onData === 'function' ? onData : null;
+  updateChrome();
+}
+
+/** Daten haben sich geändert (eigene Eingabe oder ein anderes Handy). */
+let refreshQueued = false;
+function scheduleRefresh() {
+  if (refreshQueued) return;
+  refreshQueued = true;
+  requestAnimationFrame(() => {
+    refreshQueued = false;
+    if ($('#app').hidden) return;
+    updateChrome();
+    if (!currentView || currentView.loading) { render(); return; }
+    if (currentView.onData) { currentView.onData(); return; }
+    if (currentView.form) return; // Formulare nicht unter den Fingern neu aufbauen
+    const y = window.scrollY;
+    render();
+    window.scrollTo(0, y);
+  });
+}
+
+/** Badge an der Bestellliste + Sync-Anzeige. */
+function updateChrome() {
+  const open = store.orderlist().filter((e) => e.status === 'offen').length;
+  const badge = $('#orderlist-badge');
+  badge.textContent = open;
+  badge.hidden = !open;
+  const sync = $('#sync');
+  const { pending } = store.syncState();
+  if (!navigator.onLine) {
+    sync.hidden = false;
+    sync.innerHTML = `${icon.cloudOff}<span>Offline</span>`;
+    sync.title = 'Keine Verbindung – Änderungen werden gespeichert und später übertragen.';
+  } else if (pending) {
+    sync.hidden = false;
+    sync.innerHTML = '<span class="spinner small"></span><span>Sync</span>';
+    sync.title = 'Änderungen werden übertragen …';
+  } else {
+    sync.hidden = true;
+  }
 }
 
 // ======================================================================
 // Bausteine
 // ======================================================================
 
-const sectionTitle = (text, count) =>
-  `<h2 class="section-title">${esc(text)}${count != null ? ` <span class="count">${count}</span>` : ''}</h2>`;
+const sectionTitle = (text, count, extra = '') =>
+  `<h2 class="section-title"><span>${esc(text)}</span>${count != null ? `<span class="count">${count}</span>` : ''}${extra}</h2>`;
 
 const editAction = (href, label) =>
   `<a class="icon-btn" href="${href}" aria-label="${esc(label)}" title="${esc(label)}">${icon.edit}</a>`;
@@ -208,55 +241,57 @@ const editAction = (href, label) =>
 const locBadge = (loc) =>
   loc ? `<span class="loc">${esc(loc)}</span>` : '<span class="loc loc-none">kein Lagerort</span>';
 
+const materialTitle = (m) => m.description || `Nr. ${m.nr}`;
+
 /** Listenzeile; title/sub/tag werden bereits escaped übergeben. */
-function row({ href, title, sub = '', lead = '', tag = '' }) {
-  return `<li><a class="row" href="${href}">${lead}
+function row({ href, title, sub = '', tag = '' }) {
+  return `<li><a class="row" href="${href}">
     <span class="row-main"><span class="row-title">${title}</span>${sub ? `<span class="row-sub">${sub}</span>` : ''}</span>
     ${tag}${icon.chevron}</a></li>`;
 }
 
-function materialRow(m, { qty = '', href = '', extra = '', note = '' } = {}) {
-  const tag = href ? 'a' : 'div';
-  const meta = [m.nr ? `Nr. ${esc(m.nr)}` : 'ohne Nr.', qty ? `<b>${esc(qtyLabel(qty))}</b>` : '', extra]
-    .filter(Boolean).join(' · ');
-  return `<li><${tag} class="mat"${href ? ` href="${href}"` : ''}>
-    ${locBadge(m.location)}
-    <span class="mat-body">
-      <span class="mat-name">${esc(m.name || '(ohne Bezeichnung)')}</span>
-      <span class="mat-meta">${meta}</span>
-      ${note ? `<span class="mat-note">${note}</span>` : ''}
-    </span>
-    ${href ? icon.chevron : ''}
-  </${tag}></li>`;
+function takeButton(m) {
+  const q = store.openQty(m.id);
+  return `<button type="button" class="take${q ? ' has' : ''}" data-take="${m.id}"
+    aria-label="${esc(materialTitle(m))} entnehmen und auf die Bestellliste setzen">
+    ${icon.take}<span>Entnehmen</span>${q ? `<b class="take-count">${q}</b>` : ''}</button>`;
 }
 
-function materialList(a, { editable = false } = {}) {
-  const rows = a.items
-    .map((it) => ({ m: store.getMaterial(it.materialId), qty: it.qty }))
-    .filter((r) => r.m);
-  if (!rows.length) {
-    return `<p class="empty-inline">Noch kein Verpackungsmaterial hinterlegt.
+/** Material-Zeile: Lagerort · Beschreibung/Nummer · „Entnehmen“. */
+function materialRow(m, { articleId = '', note = '', take = true } = {}) {
+  const href = `#/material/${m.id}${articleId ? `?artikel=${articleId}` : ''}`;
+  return `<li class="mat">
+    ${locBadge(m.location)}
+    <a class="mat-body" href="${href}">
+      <span class="mat-name">${esc(materialTitle(m))}</span>
+      ${m.description ? `<span class="mat-meta">Nr. ${esc(m.nr)}</span>` : ''}
+      ${note ? `<span class="mat-note">${note}</span>` : ''}
+    </a>
+    ${take ? takeButton(m) : ''}
+  </li>`;
+}
+
+const sortedMaterials = (a) =>
+  store.articleMaterials(a).sort((x, y) => locCmp(x.location, y.location) || natCmp(x.nr, y.nr));
+
+function materialList(a, opts = {}) {
+  const mats = sortedMaterials(a);
+  if (!mats.length) {
+    return `<p class="empty-inline">Noch kein Material hinterlegt.
       <a href="#/artikel/${a.id}/material/neu">Material hinzufügen</a></p>`;
   }
-  return `<ul class="mats">${rows.map((r) => materialRow(r.m, {
-    qty: r.qty,
-    href: editable ? `#/artikel/${a.id}/material/${r.m.id}` : '',
-  })).join('')}</ul>`;
+  return `<ul class="mats">${mats.map((m) => materialRow(m, { articleId: a.id, ...opts })).join('')}</ul>`;
 }
 
 function articleBlock(a, opts) {
   return `<section class="art">
-    <a class="art-head" href="#/artikel/${a.id}">
-      <span class="art-code">Artikel ${esc(a.code)}</span>${a.name ? `<span class="art-name">${esc(a.name)}</span>` : ''}
-    </a>
+    <a class="art-head" href="#/artikel/${a.id}"><span class="eyebrow">Artikel</span><span class="art-name">${esc(a.name)}</span></a>
     ${materialList(a, opts)}
   </section>`;
 }
 
-const orderArticles = (o) => o.articleIds.map(store.getArticle).filter(Boolean);
-
 function orderCard(o, { primary = false } = {}) {
-  const arts = orderArticles(o);
+  const a = store.getArticle(o.articleId);
   return `<article class="card">
     <a class="card-head" href="#/auftrag/${o.id}"${primary ? ' data-primary' : ''}>
       <span class="card-head-main">
@@ -265,7 +300,7 @@ function orderCard(o, { primary = false } = {}) {
         ${o.note ? `<span class="card-sub">${esc(o.note)}</span>` : ''}
       </span>${icon.chevron}
     </a>
-    ${arts.length ? arts.map((a) => articleBlock(a)).join('')
+    ${a ? articleBlock(a)
       : `<p class="empty-inline pad">Kein Artikel zugeordnet. <a href="#/auftrag/${o.id}/bearbeiten">Artikel zuordnen</a></p>`}
   </article>`;
 }
@@ -275,11 +310,8 @@ function articleCard(a, { primary = false } = {}) {
   const shown = ords.slice(0, 6).map((o) => `<a href="#/auftrag/${o.id}">${esc(o.nr)}</a>`).join(', ');
   return `<article class="card">
     <a class="card-head" href="#/artikel/${a.id}"${primary ? ' data-primary' : ''}>
-      <span class="card-head-main">
-        <span class="eyebrow">Artikel</span>
-        <span class="card-title">${esc(a.code)}</span>
-        ${a.name ? `<span class="card-sub">${esc(a.name)}</span>` : ''}
-      </span>${icon.chevron}
+      <span class="card-head-main"><span class="eyebrow">Artikel</span><span class="card-title">${esc(a.name)}</span></span>
+      ${icon.chevron}
     </a>
     <div class="art">${materialList(a)}</div>
     ${ords.length ? `<p class="card-foot">Aufträge: ${shown}${ords.length > 6 ? ` +${ords.length - 6}` : ''}</p>` : ''}
@@ -287,44 +319,38 @@ function articleCard(a, { primary = false } = {}) {
 }
 
 function orderRow(o) {
-  const codes = orderArticles(o).map((a) => a.code);
-  const sub = [codes.length ? `Artikel ${codes.join(', ')}` : '', o.note].filter(Boolean).join(' · ');
+  const a = store.getArticle(o.articleId);
+  const sub = [a?.name, o.note].filter(Boolean).join(' · ');
   return row({
     href: `#/auftrag/${o.id}`,
     title: esc(o.nr),
     sub: esc(sub),
-    tag: codes.length ? '' : '<span class="tag">kein Artikel</span>',
+    tag: a ? '' : '<span class="tag">kein Artikel</span>',
   });
 }
 
 function articleRow(a) {
-  const n = store.ordersWithArticle(a.id).length;
-  const sub = [a.name, plural(a.items.length, 'Material', 'Materialien'), plural(n, 'Auftrag', 'Aufträge')]
-    .filter(Boolean).join(' · ');
+  const nMat = (a.materialIds || []).length;
+  const nOrd = store.ordersWithArticle(a.id).length;
   return row({
     href: `#/artikel/${a.id}`,
-    title: esc(a.code),
-    sub: esc(sub),
-    tag: a.items.length ? '' : '<span class="tag">kein Material</span>',
+    title: esc(a.name),
+    sub: esc(`${plural(nMat, 'Material', 'Materialien')} · ${plural(nOrd, 'Auftrag', 'Aufträge')}`),
+    tag: nMat ? '' : '<span class="tag">kein Material</span>',
   });
 }
-
-const usageText = (m) => {
-  const n = store.articlesWithMaterial(m.id).length;
-  return n ? `in ${plural(n, 'Artikel', 'Artikeln')}` : '<span class="warn-text">nicht verwendet</span>';
-};
 
 function field({ id, label, value = '', placeholder = '', optional = false, attrs = '', hint = '', suggest = false }) {
   const input = `<input id="${id}" class="input" value="${esc(value ?? '')}" placeholder="${esc(placeholder)}" ${attrs}>`;
   return `<div class="field">
     <label for="${id}">${esc(label)}${optional ? ' <span class="opt">optional</span>' : ''}</label>
     ${suggest ? `<div class="suggest-wrap">${input}</div>` : input}
-    ${hint ? `<p class="hint">${hint}</p>` : ''}
+    <p class="hint" ${hint ? '' : 'hidden'}>${hint}</p>
   </div>`;
 }
 
-const deleteButton = (label) =>
-  `<button type="button" class="btn btn-danger btn-block" id="del">${icon.trash}<span>${esc(label)}</span></button>`;
+const deleteButton = (label, id = 'del') =>
+  `<button type="button" class="btn btn-danger btn-block" id="${id}">${icon.trash}<span>${esc(label)}</span></button>`;
 
 function filterField(placeholder, key) {
   return `<label class="filter">${icon.search}
@@ -339,8 +365,7 @@ function bindFilter(root, key, draw) {
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } });
 }
 
-const filterChip = (label, href) =>
-  `<a class="filter-chip" href="${href}">${esc(label)}${icon.close}</a>`;
+const filterChip = (label, href) => `<a class="filter-chip" href="${href}">${esc(label)}${icon.close}</a>`;
 
 function emptyBox(title, text, button = '') {
   return `<div class="card empty"><h2>${esc(title)}</h2>${text ? `<p>${text}</p>` : ''}${button}</div>`;
@@ -355,6 +380,25 @@ function nextOnEnter(...inputs) {
       if (e.key === 'Enter') { e.preventDefault(); next.focus(); }
     });
   });
+}
+
+function locationSuggest(input) {
+  attachSuggest(input, {
+    source: (q) => {
+      const mm = matcher(q);
+      return store.locations()
+        .filter((l) => (!q.trim() || mm(l)) && norm(l) !== norm(q))
+        .map((l) => ({ label: l, value: l }));
+    },
+    onPick: (it) => { input.value = it.value; input.dispatchEvent(new Event('input', { bubbles: true })); },
+  });
+}
+
+function rank(list, score, tiebreak) {
+  return list
+    .map((x) => ({ x, s: score(x) }))
+    .filter((r) => r.s > 0)
+    .sort((a, b) => b.s - a.s || tiebreak(a.x, b.x));
 }
 
 function notFound(kind = 'Seite') {
@@ -423,29 +467,22 @@ function viewSearch() {
         else input.removeAttribute('inputmode');
         kbd.textContent = prefs.numericSearch ? 'ABC' : '123';
         kbd.setAttribute('aria-label', prefs.numericSearch ? 'Buchstaben-Tastatur verwenden' : 'Zahlen-Tastatur verwenden');
-        // Tastatur neu öffnen, damit der Wechsel sofort greift.
         input.blur();
         input.focus();
       });
       draw();
       if (matchMedia('(pointer: fine)').matches) input.focus();
+      return draw;
     },
   };
-}
-
-function rank(list, score, tiebreak) {
-  return list
-    .map((x) => ({ x, s: score(x) }))
-    .filter((r) => r.s > 0)
-    .sort((a, b) => b.s - a.s || tiebreak(a.x, b.x));
 }
 
 function searchResults(q) {
   if (!q.trim()) return searchHome();
   const m = matcher(q);
   const orders = rank(store.orders(), (o) => Math.max(m(o.nr) * 10, m(o.note)), (a, b) => natCmp(a.nr, b.nr));
-  const arts = rank(store.articles(), (a) => Math.max(m(a.code) * 10, m(a.name)), (a, b) => natCmp(a.code, b.code));
-  const mats = rank(store.materials(), (x) => Math.max(m(x.nr) * 10, m(x.name) * 2, m(x.location) * 2),
+  const arts = rank(store.articles(), (a) => m(a.name) * 10, (a, b) => natCmp(a.name, b.name));
+  const mats = rank(store.materials(), (x) => Math.max(m(x.nr) * 10, m(x.description) * 2, m(x.location) * 2),
     (a, b) => locCmp(a.location, b.location));
 
   if (!orders.length && !arts.length && !mats.length) {
@@ -456,14 +493,13 @@ function searchResults(q) {
 
   const out = [];
   let primaryUsed = false;
-  // Ein exakter Treffer (oder ein einziger) wird mit Enter direkt geöffnet.
+  // Ein exakter (oder einziger) Treffer wird mit Enter direkt geöffnet.
   const isPrimary = (r, total) => {
     if (primaryUsed || !(total === 1 || r.s >= 30)) return false;
     primaryUsed = true;
     return true;
   };
-
-  // Wenige Treffer: komplett aufgeklappt (mit Material + Lagerort). Viele: exakte Treffer aufgeklappt, Rest als Liste.
+  // Wenige Treffer: aufgeklappt mit Material + Lagerort. Viele: exakte aufgeklappt, Rest als Liste.
   const section = (title, results, card, compactRow) => {
     if (!results.length) return;
     out.push(sectionTitle(title, results.length));
@@ -478,15 +514,11 @@ function searchResults(q) {
   };
   section('Aufträge', orders, orderCard, orderRow);
   section('Artikel', arts, articleCard, articleRow);
-
   if (mats.length) {
     out.push(sectionTitle('Material', mats.length));
     out.push(`<div class="card"><ul class="mats pad">${mats.slice(0, LIST_LIMIT).map(({ x }) => {
-      const used = store.articlesWithMaterial(x.id).map((a) => esc(a.code));
-      return materialRow(x, {
-        href: `#/material/${x.id}`,
-        note: used.length ? `für Artikel ${used.join(', ')}` : '',
-      });
+      const used = store.articlesWithMaterial(x.id).map((a) => esc(a.name));
+      return materialRow(x, { note: used.length ? `für ${used.join(', ')}` : '' });
     }).join('')}</ul></div>`);
   }
   return out.join('');
@@ -497,25 +529,27 @@ function searchHome() {
     return `<div class="card intro">
       <h2>So funktioniert’s</h2>
       <ol class="steps">
-        <li><b>Auftrag anlegen</b> und die ArtikelID(s) zuordnen.</li>
-        <li><b>Material hinterlegen:</b> beim Artikel die Verpackungsmaterialien mit Lagerort eintragen.</li>
-        <li><b>Im Lager nachschlagen:</b> Auftragsnummer hier eintippen – sofort sehen, was gebraucht wird und wo es liegt.</li>
+        <li><b>Auftrag anlegen</b> und eine Artikelbezeichnung zuordnen (z. B. „5er“, „200er“).</li>
+        <li><b>Material hinterlegen:</b> beim Artikel die Artikelnummern der Materialien eintragen – Beschreibung und Lagerort optional.</li>
+        <li><b>Im Lager:</b> Auftragsnummer eintippen, sehen was wo liegt, und mit <b>Entnehmen</b> auf die Bestellliste setzen.</li>
       </ol>
       <a class="btn btn-primary btn-block" href="#/auftrag/neu">${icon.plus}<span>Ersten Auftrag anlegen</span></a>
     </div>`;
   }
   const recent = prefs.recent.map(store.getOrder).filter(Boolean);
-  const noMaterial = store.articles().filter((a) => !a.items.length).length;
+  const open = store.orderlist().filter((e) => e.status === 'offen');
+  const noMaterial = store.articles().filter((a) => !(a.materialIds || []).length).length;
   const noLocation = store.materials().filter((m) => !m.location).length;
   const todo = [
-    noMaterial && row({ href: '#/artikel?offen=1', title: esc(`${plural(noMaterial, 'Artikel', 'Artikel')} ohne Material`), sub: 'Verpackungsmaterial hinterlegen' }),
+    open.length && row({ href: '#/bestellliste', title: esc(`${plural(open.length, 'Position', 'Positionen')} auf der Bestellliste`), sub: 'Entnommenes Material nachbestellen' }),
+    noMaterial && row({ href: '#/artikel?offen=1', title: esc(`${plural(noMaterial, 'Artikel', 'Artikel')} ohne Material`), sub: 'Materialien hinterlegen' }),
     noLocation && row({ href: '#/material?offen=1', title: esc(`${plural(noLocation, 'Material', 'Materialien')} ohne Lagerort`), sub: 'Lagerort eintragen' }),
   ].filter(Boolean);
   return `
     ${recent.length
       ? `${sectionTitle('Zuletzt angesehen')}<ul class="card list">${recent.map(orderRow).join('')}</ul>`
-      : '<p class="hint center">Auftragsnummer, ArtikelID, Materialnummer oder Lagerort eintippen.</p>'}
-    ${todo.length ? `${sectionTitle('Noch offen')}<ul class="card list">${todo.join('')}</ul>` : ''}
+      : '<p class="hint center">Auftragsnummer, Artikelbezeichnung, Artikelnummer oder Lagerort eintippen.</p>'}
+    ${todo.length ? `${sectionTitle('Zu erledigen')}<ul class="card list">${todo.join('')}</ul>` : ''}
     <a class="btn btn-secondary btn-block" href="#/auftrag/neu">${icon.plus}<span>Neuer Auftrag</span></a>`;
 }
 
@@ -533,10 +567,8 @@ function viewOrders() {
       const draw = () => {
         const q = state.filter.auftraege;
         const m = matcher(q);
-        let list = [...store.orders()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-        if (q.trim()) {
-          list = list.filter((o) => m(o.nr) || m(o.note) || orderArticles(o).some((a) => m(a.code) || m(a.name)));
-        }
+        let list = store.orders().sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        if (q.trim()) list = list.filter((o) => m(o.nr) || m(o.note) || m(store.getArticle(o.articleId)?.name));
         $('#list', root).innerHTML = list.length
           ? `<ul class="card list">${list.map(orderRow).join('')}</ul>`
           : store.orders().length
@@ -545,6 +577,7 @@ function viewOrders() {
       };
       bindFilter(root, 'auftraege', draw);
       draw();
+      return draw;
     },
   };
 }
@@ -553,18 +586,7 @@ function viewOrder(id) {
   const o = store.getOrder(id);
   if (!o) return notFound('Auftrag');
   rememberOrder(o.id);
-  const arts = orderArticles(o);
-  const multi = arts.length > 1;
-
-  const body = () => {
-    if (!arts.length) {
-      return emptyBox('Kein Artikel zugeordnet', 'Ordne dem Auftrag eine oder mehrere ArtikelIDs zu.',
-        `<a class="btn btn-primary" href="#/auftrag/${o.id}/bearbeiten">Artikel zuordnen</a>`);
-    }
-    if (multi && prefs.orderMode === 'lagerort') return pickList(arts);
-    return arts.map((a) => `<div class="card">${articleBlock(a, { editable: true })}</div>`).join('');
-  };
-
+  const a = store.getArticle(o.articleId);
   return {
     title: 'Auftrag',
     back: '#/auftraege',
@@ -576,157 +598,93 @@ function viewOrder(id) {
         <div class="detail-title">${esc(o.nr)}</div>
         ${o.note ? `<div class="detail-sub">${esc(o.note)}</div>` : ''}
       </div>
-      ${multi ? `<div class="seg" role="group" aria-label="Ansicht">
-        <button type="button" data-mode="artikel">Nach Artikel</button>
-        <button type="button" data-mode="lagerort">Nach Lagerort</button>
-      </div>` : ''}
-      <div id="order-body">${body()}</div>`,
-    mount(root) {
-      const seg = $('.seg', root);
-      if (!seg) return;
-      const sync = () => $$('button', seg).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === prefs.orderMode)));
-      sync();
-      seg.addEventListener('click', (e) => {
-        const b = e.target.closest('button');
-        if (!b) return;
-        prefs.orderMode = b.dataset.mode;
-        savePrefs();
-        sync();
-        $('#order-body', root).innerHTML = body();
-      });
-    },
+      ${a ? `<div class="card">${articleBlock(a)}</div>
+        <a class="btn btn-secondary btn-block" href="#/artikel/${a.id}/material/neu">${icon.plus}<span>Material zu „${esc(a.name)}“ hinzufügen</span></a>`
+        : emptyBox('Kein Artikel zugeordnet', 'Ordne dem Auftrag eine Artikelbezeichnung zu.',
+          `<a class="btn btn-primary" href="#/auftrag/${o.id}/bearbeiten">Artikel zuordnen</a>`)}`,
   };
-}
-
-/** Alle Materialien eines Auftrags zusammengefasst, nach Lagerort sortiert (Laufweg). */
-function pickList(arts) {
-  const byMaterial = new Map();
-  for (const a of arts) {
-    for (const it of a.items) {
-      const m = store.getMaterial(it.materialId);
-      if (!m) continue;
-      if (!byMaterial.has(m.id)) byMaterial.set(m.id, { m, uses: [] });
-      byMaterial.get(m.id).uses.push(`${esc(a.code)}${it.qty ? ` (${esc(qtyLabel(it.qty))})` : ''}`);
-    }
-  }
-  const rows = [...byMaterial.values()]
-    .sort((x, y) => locCmp(x.m.location, y.m.location) || natCmp(x.m.name, y.m.name));
-  if (!rows.length) return emptyBox('Noch kein Material', 'Für die Artikel dieses Auftrags ist noch nichts hinterlegt.');
-  return `<div class="card"><ul class="mats pad">${rows.map((r) => materialRow(r.m, {
-    href: `#/material/${r.m.id}`,
-    note: `für Artikel ${r.uses.join(', ')}`,
-  })).join('')}</ul></div>`;
 }
 
 function viewOrderEdit(id, query) {
   const o = id ? store.getOrder(id) : null;
   if (id && !o) return notFound('Auftrag');
-  const params = new URLSearchParams(query || '');
-  const presetNr = params.get('nr') || '';
-  const codes = o ? orderArticles(o).map((a) => a.code) : [];
+  const presetNr = new URLSearchParams(query || '').get('nr') || '';
+  const currentArticle = o ? store.getArticle(o.articleId) : null;
 
   return {
     title: o ? 'Auftrag bearbeiten' : 'Neuer Auftrag',
     back: o ? `#/auftrag/${o.id}` : '#/auftraege',
     tab: 'auftraege',
+    form: true,
     html: `
       <form class="card form" id="f" novalidate>
         ${field({ id: 'nr', label: 'Auftragsnummer', value: o?.nr ?? presetNr, placeholder: 'z. B. 630-202878', attrs: `${CODE_ATTRS} enterkeyhint="next"` })}
-        ${field({ id: 'note', label: 'Notiz', optional: true, value: o?.note, placeholder: 'z. B. Kunde, Bestellnummer, Menge', attrs: 'autocomplete="off" enterkeyhint="next"' })}
-        <div class="field">
-          <label for="art-input">Artikel</label>
-          <ul class="chips" id="chips"></ul>
-          <div class="add-row">
-            <div class="suggest-wrap"><input id="art-input" class="input" placeholder="ArtikelID eingeben" ${CODE_ATTRS} enterkeyhint="done"></div>
-            <button type="button" class="btn btn-secondary btn-square" id="art-add" aria-label="Artikel hinzufügen">${icon.plus}</button>
-          </div>
-          <p class="hint">Unbekannte ArtikelIDs werden beim Speichern neu angelegt.</p>
-        </div>
+        ${field({ id: 'art', label: 'Artikelbezeichnung', value: currentArticle?.name, placeholder: 'suchen, z. B. 5er oder 200er', attrs: 'autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="next"', suggest: true })}
+        <div id="art-preview"></div>
+        ${field({ id: 'note', label: 'Notiz', optional: true, value: o?.note, placeholder: 'z. B. Kunde, Menge', attrs: 'autocomplete="off" enterkeyhint="done"' })}
         <p class="form-error" id="err" role="alert"></p>
         <button class="btn btn-primary btn-block" type="submit">Speichern</button>
       </form>
       ${o ? deleteButton('Auftrag löschen') : ''}`,
     mount(root) {
       const nr = $('#nr', root);
+      const art = $('#art', root);
       const note = $('#note', root);
-      const artInput = $('#art-input', root);
-      const err = $('#err', root);
+      const hint = art.closest('.field').querySelector('.hint');
 
-      const draw = () => {
-        $('#chips', root).innerHTML = codes.map((c, i) => {
-          const a = store.findArticleByCode(c);
-          const sub = a
-            ? [a.name, plural(a.items.length, 'Material', 'Materialien')].filter(Boolean).join(' · ')
-            : 'neu – wird beim Speichern angelegt';
-          return `<li class="chip">
-            <span class="chip-main"><span class="chip-code">Artikel ${esc(c)}</span><span class="chip-sub">${esc(sub)}</span></span>
-            <button type="button" class="icon-btn" data-remove="${i}" aria-label="Artikel ${esc(c)} entfernen">${icon.close}</button>
-          </li>`;
-        }).join('');
+      // Vorschau: welche Materialien hängen an der gewählten Artikelbezeichnung?
+      const preview = () => {
+        const a = store.findArticleByName(art.value);
+        const box = $('#art-preview', root);
+        if (a) {
+          const mats = sortedMaterials(a);
+          hint.hidden = true;
+          box.innerHTML = mats.length
+            ? `<ul class="mats preview">${mats.map((m) => materialRow(m, { take: false })).join('')}</ul>`
+            : '<p class="hint preview-empty">Für diesen Artikel ist noch kein Material hinterlegt.</p>';
+        } else {
+          box.innerHTML = '';
+          hint.hidden = !art.value.trim();
+          hint.textContent = `„${art.value.trim()}“ ist neu und wird beim Speichern angelegt.`;
+        }
       };
-      const add = (raw) => {
-        const code = raw.trim();
-        if (!code) return;
-        const finalCode = store.findArticleByCode(code)?.code ?? code;
-        if (!codes.some((c) => norm(c) === norm(finalCode))) codes.push(finalCode);
-        artInput.value = '';
-        draw();
-        suggest.refresh();
-      };
-      const suggest = attachSuggest(artInput, {
+      attachSuggest(art, {
         source: (q) => {
           const m = matcher(q);
-          return store.articles()
-            .filter((a) => !codes.some((c) => norm(c) === norm(a.code)))
-            .map((a) => ({ a, s: q.trim() ? Math.max(m(a.code) * 10, m(a.name)) : 1 }))
-            .filter((r) => r.s > 0)
-            .sort((x, y) => y.s - x.s || natCmp(x.a.code, y.a.code))
-            .map(({ a }) => ({
-              label: `Artikel ${a.code}`,
-              sub: [a.name, plural(a.items.length, 'Material', 'Materialien')].filter(Boolean).join(' · '),
-              code: a.code,
+          return rank(store.articles(), (a) => (q.trim() ? m(a.name) : 1), (x, y) => natCmp(x.name, y.name))
+            .filter(({ x }) => norm(x.name) !== norm(q))
+            .map(({ x }) => ({
+              label: x.name,
+              sub: plural((x.materialIds || []).length, 'Material', 'Materialien'),
+              name: x.name,
             }));
         },
-        onPick: (it) => add(it.code),
+        onPick: (it) => { art.value = it.name; preview(); note.focus(); },
+        max: 12,
       });
-
-      $('#chips', root).addEventListener('click', (e) => {
-        const b = e.target.closest('[data-remove]');
-        if (!b) return;
-        codes.splice(Number(b.dataset.remove), 1);
-        draw();
-      });
-      $('#art-add', root).addEventListener('click', () => { add(artInput.value); artInput.focus(); });
-      artInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); add(artInput.value); }
-      });
-      nextOnEnter(nr, note, artInput);
+      art.addEventListener('input', preview);
+      nextOnEnter(nr, art, note);
 
       $('#f', root).addEventListener('submit', (e) => {
         e.preventDefault();
-        add(artInput.value); // noch nicht übernommene Eingabe nicht verlieren
         try {
-          const saved = store.saveOrder({ id: o?.id, nr: nr.value, note: note.value, articleCodes: codes });
+          const saved = store.saveOrder({ id: o?.id, nr: nr.value, note: note.value, articleName: art.value });
           toast('Auftrag gespeichert');
           if (o) back(`#/auftrag/${saved.id}`);
           else replace(`#/auftrag/${saved.id}`);
         } catch (ex) {
-          err.textContent = ex.message;
+          $('#err', root).textContent = ex.message;
         }
       });
       $('#del', root)?.addEventListener('click', () => {
         if (!confirm(`Auftrag ${o.nr} löschen?\n\nArtikel und Materialien bleiben erhalten.`)) return;
-        try {
-          store.deleteOrder(o.id);
-          toast('Auftrag gelöscht');
-          replace('#/auftraege');
-        } catch (ex) {
-          toast(ex.message, 'error');
-        }
+        store.deleteOrder(o.id);
+        toast('Auftrag gelöscht');
+        replace('#/auftraege');
       });
 
-      draw();
-      if (!o) (presetNr ? artInput : nr).focus();
+      preview();
+      if (!o) (presetNr ? art : nr).focus();
     },
   };
 }
@@ -748,20 +706,21 @@ function viewArticles(query) {
       const draw = () => {
         const q = state.filter.artikel;
         const m = matcher(q);
-        let list = store.articles().filter((a) => !onlyOpen || !a.items.length);
+        let list = store.articles().filter((a) => !onlyOpen || !(a.materialIds || []).length);
         if (q.trim()) {
-          list = list.filter((a) => m(a.code) || m(a.name)
-            || a.items.some((it) => { const x = store.getMaterial(it.materialId); return x && (m(x.nr) || m(x.name)); }));
+          list = list.filter((a) => m(a.name)
+            || store.articleMaterials(a).some((x) => m(x.nr) || m(x.description)));
         }
-        list = [...list].sort((a, b) => natCmp(a.code, b.code));
+        list.sort((a, b) => natCmp(a.name, b.name));
         $('#list', root).innerHTML = list.length
           ? `<ul class="card list">${list.map(articleRow).join('')}</ul>`
           : store.articles().length
             ? emptyBox('Keine Treffer', onlyOpen ? 'Alle Artikel haben Material hinterlegt.' : 'Filter anpassen oder löschen.')
-            : emptyBox('Noch keine Artikel', 'Artikel entstehen automatisch beim Anlegen eines Auftrags – oder tippe auf <b>+</b>.');
+            : emptyBox('Noch keine Artikel', 'Artikel entstehen beim Anlegen eines Auftrags – oder tippe auf <b>+</b>.');
       };
       bindFilter(root, 'artikel', draw);
       draw();
+      return draw;
     },
   };
 }
@@ -770,19 +729,19 @@ function viewArticle(id) {
   const a = store.getArticle(id);
   if (!a) return notFound('Artikel');
   const ords = store.ordersWithArticle(a.id);
+  const nMat = (a.materialIds || []).length;
   return {
     title: 'Artikel',
     back: '#/artikel',
     tab: 'artikel',
-    action: editAction(`#/artikel/${a.id}/bearbeiten`, 'Artikel bearbeiten'),
+    action: editAction(`#/artikel/${a.id}/bearbeiten`, 'Artikel umbenennen'),
     html: `
       <div class="detail-head">
         <span class="eyebrow">Artikel</span>
-        <div class="detail-title">${esc(a.code)}</div>
-        ${a.name ? `<div class="detail-sub">${esc(a.name)}</div>` : ''}
+        <div class="detail-title">${esc(a.name)}</div>
       </div>
-      ${sectionTitle('Verpackungsmaterial', a.items.length)}
-      ${a.items.length ? `<div class="card art">${materialList(a, { editable: true })}</div>` : ''}
+      ${sectionTitle('Materialien', nMat)}
+      ${nMat ? `<div class="card art">${materialList(a)}</div>` : ''}
       <a class="btn btn-primary btn-block" href="#/artikel/${a.id}/material/neu">${icon.plus}<span>Material hinzufügen</span></a>
       ${sectionTitle('Aufträge mit diesem Artikel', ords.length)}
       ${ords.length ? `<ul class="card list">${ords.map(orderRow).join('')}</ul>`
@@ -790,29 +749,28 @@ function viewArticle(id) {
   };
 }
 
-function viewArticleEdit(id) {
+function viewArticleEdit(id, query) {
   const a = id ? store.getArticle(id) : null;
   if (id && !a) return notFound('Artikel');
+  const preset = new URLSearchParams(query || '').get('name') || '';
   return {
-    title: a ? 'Artikel bearbeiten' : 'Neuer Artikel',
+    title: a ? 'Artikel umbenennen' : 'Neuer Artikel',
     back: a ? `#/artikel/${a.id}` : '#/artikel',
     tab: 'artikel',
+    form: true,
     html: `
       <form class="card form" id="f" novalidate>
-        ${field({ id: 'code', label: 'ArtikelID', value: a?.code, placeholder: 'z. B. 32', attrs: `${CODE_ATTRS} enterkeyhint="next"` })}
-        ${field({ id: 'name', label: 'Bezeichnung', optional: true, value: a?.name, placeholder: 'z. B. Filter 5+10 ml, 10 St. im Btl.', attrs: 'autocomplete="off" enterkeyhint="done"' })}
+        ${field({ id: 'name', label: 'Artikelbezeichnung', value: a?.name ?? preset, placeholder: 'z. B. 5er, 200er', attrs: 'autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="done"' })}
         <p class="form-error" id="err" role="alert"></p>
         <button class="btn btn-primary btn-block" type="submit">Speichern</button>
       </form>
       ${a ? deleteButton('Artikel löschen') : ''}`,
     mount(root) {
-      const code = $('#code', root);
       const name = $('#name', root);
-      nextOnEnter(code, name);
       $('#f', root).addEventListener('submit', (e) => {
         e.preventDefault();
         try {
-          const saved = store.saveArticle({ id: a?.id, code: code.value, name: name.value });
+          const saved = store.saveArticle({ id: a?.id, name: name.value });
           toast('Artikel gespeichert');
           if (a) back(`#/artikel/${saved.id}`);
           else replace(`#/artikel/${saved.id}`);
@@ -823,149 +781,120 @@ function viewArticleEdit(id) {
       $('#del', root)?.addEventListener('click', () => {
         const n = store.ordersWithArticle(a.id).length;
         const extra = n ? `\n\nEr wird aus ${plural(n, 'Auftrag', 'Aufträgen')} entfernt.` : '';
-        if (!confirm(`Artikel ${a.code} löschen?${extra}\n\nDie Materialien bleiben in der Materialliste erhalten.`)) return;
-        try {
-          store.deleteArticle(a.id);
-          toast('Artikel gelöscht');
-          replace('#/artikel');
-        } catch (ex) {
-          toast(ex.message, 'error');
-        }
+        if (!confirm(`Artikel „${a.name}“ löschen?${extra}\n\nDie Materialien bleiben erhalten.`)) return;
+        store.deleteArticle(a.id);
+        toast('Artikel gelöscht');
+        replace('#/artikel');
       });
-      if (!a) code.focus();
+      if (!a) name.focus();
     },
   };
 }
 
-/** Material an einem Artikel hinzufügen bzw. bearbeiten. */
-function viewItemEdit(articleId, materialId) {
+/** Material (per Artikelnummer) einem Artikel zuordnen. */
+function viewAddMaterial(articleId) {
   const a = store.getArticle(articleId);
   if (!a) return notFound('Artikel');
-  const item = materialId ? a.items.find((it) => it.materialId === materialId) : null;
-  if (materialId && !item) return notFound('Material');
-  const m = item ? store.getMaterial(item.materialId) : null;
-
-  const existingList = () => {
-    const rows = a.items.map((it) => store.getMaterial(it.materialId)).filter(Boolean);
-    return rows.length
-      ? `${sectionTitle('Bereits hinterlegt', rows.length)}<div class="card"><ul class="mats pad">${
-        a.items.map((it) => {
-          const x = store.getMaterial(it.materialId);
-          return x ? materialRow(x, { qty: it.qty }) : '';
-        }).join('')}</ul></div>`
-      : '';
-  };
-
   return {
-    title: item ? 'Material bearbeiten' : 'Material hinzufügen',
+    title: 'Material hinzufügen',
     back: `#/artikel/${a.id}`,
     tab: 'artikel',
+    form: true,
     html: `
-      <p class="context">für Artikel <b>${esc(a.code)}</b>${a.name ? ` · ${esc(a.name)}` : ''}</p>
+      <p class="context">für Artikel <b>${esc(a.name)}</b></p>
       <form class="card form" id="f" novalidate>
-        ${field({ id: 'm-nr', label: 'Materialnummer', value: m?.nr, placeholder: 'z. B. 001240007100', attrs: `${CODE_ATTRS} enterkeyhint="next"`, suggest: true })}
-        ${field({ id: 'm-name', label: 'Bezeichnung', value: m?.name, placeholder: 'z. B. Lagerbeutel 70x100', attrs: 'autocomplete="off" enterkeyhint="next"', suggest: true })}
-        ${field({ id: 'm-loc', label: 'Lagerort', value: m?.location, placeholder: 'z. B. R3-F2', attrs: `${CODE_ATTRS} enterkeyhint="next"`, suggest: true })}
-        ${field({ id: 'm-qty', label: 'Menge', optional: true, value: item?.qty, placeholder: 'z. B. 2 oder „1 je 10 St.“', attrs: 'autocomplete="off" enterkeyhint="done"' })}
+        ${field({ id: 'm-nr', label: 'Artikelnummer', value: '', placeholder: 'z. B. 001240007100', attrs: `${CODE_ATTRS} enterkeyhint="next"`, suggest: true })}
+        ${field({ id: 'm-desc', label: 'Beschreibung', optional: true, placeholder: 'z. B. Lagerbeutel 70x100', attrs: 'autocomplete="off" enterkeyhint="next"', suggest: true })}
+        ${field({ id: 'm-loc', label: 'Lagerort', optional: true, placeholder: 'z. B. R3-F2', attrs: `${CODE_ATTRS} enterkeyhint="done"`, suggest: true })}
         <p class="info" id="shared-info" hidden></p>
         <p class="form-error" id="err" role="alert"></p>
         <button class="btn btn-primary btn-block" type="submit">Speichern</button>
-        ${item ? '' : '<button class="btn btn-secondary btn-block" type="button" id="save-next">Speichern &amp; nächstes Material</button>'}
+        <button class="btn btn-secondary btn-block" type="button" id="save-next">Speichern &amp; nächstes Material</button>
       </form>
-      ${item ? deleteButton('Vom Artikel entfernen') : '<div id="existing"></div>'}`,
+      <div id="existing"></div>`,
     mount(root) {
       const nr = $('#m-nr', root);
-      const name = $('#m-name', root);
+      const desc = $('#m-desc', root);
       const loc = $('#m-loc', root);
-      const qty = $('#m-qty', root);
       const info = $('#shared-info', root);
       const err = $('#err', root);
       // Zuletzt automatisch übernommene Werte – nur diese dürfen wieder überschrieben/geleert werden.
-      let auto = { name: m?.name ?? null, loc: m?.location ?? null, clearable: false };
+      let auto = { desc: null, loc: null };
 
       const updateInfo = () => {
         const match = store.findMaterialByNr(nr.value);
         if (!match) { info.hidden = true; return; }
         const others = store.articlesWithMaterial(match.id).filter((x) => x.id !== a.id).length;
+        const inThis = (a.materialIds || []).includes(match.id);
         info.hidden = false;
-        info.textContent = others
-          ? `Bekanntes Material – auch in ${plural(others, 'anderem Artikel', 'anderen Artikeln')} verwendet. Bezeichnung und Lagerort gelten überall.`
-          : 'Bekanntes Material aus der Materialliste.';
+        info.textContent = [
+          'Bekanntes Material.',
+          inThis ? 'Ist diesem Artikel schon zugeordnet.' : '',
+          others ? `Auch in ${plural(others, 'anderem Artikel', 'anderen Artikeln')} verwendet – Beschreibung und Lagerort gelten überall.` : '',
+        ].filter(Boolean).join(' ');
       };
-      const fill = (mat) => {
-        nr.value = mat.nr;
-        name.value = mat.name;
-        loc.value = mat.location;
-        auto = { name: mat.name, loc: mat.location, clearable: true };
+      const fill = (m) => {
+        nr.value = m.nr;
+        desc.value = m.description || '';
+        loc.value = m.location || '';
+        auto = { desc: desc.value, loc: loc.value };
         updateInfo();
       };
-
       nr.addEventListener('input', () => {
         const match = store.findMaterialByNr(nr.value);
         if (match) {
-          if (!name.value || name.value === auto.name) name.value = match.name;
-          if (!loc.value || loc.value === auto.loc) loc.value = match.location;
-          auto = { name: match.name, loc: match.location, clearable: true };
-        } else if (auto.clearable) {
-          if (name.value === auto.name) name.value = '';
-          if (loc.value === auto.loc) loc.value = '';
-          auto = { name: null, loc: null, clearable: false };
+          if (!desc.value || desc.value === auto.desc) desc.value = match.description || '';
+          if (!loc.value || loc.value === auto.loc) loc.value = match.location || '';
+          auto = { desc: match.description || '', loc: match.location || '' };
+        } else {
+          if (auto.desc !== null && desc.value === auto.desc) desc.value = '';
+          if (auto.loc !== null && loc.value === auto.loc) loc.value = '';
+          auto = { desc: null, loc: null };
         }
         updateInfo();
       });
 
-      // `exact`: Feldwert, bei dem das Material schon übernommen ist – dann keinen Vorschlag mehr zeigen.
-      const materialSuggestions = (q, fieldScore, exact) => {
+      const suggestMaterials = (q, score, exact) => {
         if (!q.trim()) return [];
         const mm = matcher(q);
-        const inArticle = new Set(a.items.map((it) => it.materialId));
-        return rank(store.materials(), (x) => fieldScore(mm, x), (x, y) => natCmp(x.name, y.name))
+        return rank(store.materials(), (x) => score(mm, x), (x, y) => natCmp(x.nr, y.nr))
           .filter(({ x }) => norm(exact(x)) !== norm(q))
           .map(({ x }) => ({
-            label: x.nr ? `${x.nr} – ${x.name || '(ohne Bezeichnung)'}` : x.name,
-            sub: [x.location ? `Lagerort ${x.location}` : 'kein Lagerort', inArticle.has(x.id) ? 'schon im Artikel' : '']
-              .filter(Boolean).join(' · '),
+            label: x.description ? `${x.nr} – ${x.description}` : x.nr,
+            sub: [x.location ? `Lagerort ${x.location}` : 'kein Lagerort',
+              (a.materialIds || []).includes(x.id) ? 'schon im Artikel' : ''].filter(Boolean).join(' · '),
             mat: x,
           }));
       };
       attachSuggest(nr, {
-        source: (q) => materialSuggestions(q, (mm, x) => Math.max(mm(x.nr) * 10, mm(x.name)), (x) => x.nr),
-        onPick: (it) => { fill(it.mat); qty.focus(); },
+        source: (q) => suggestMaterials(q, (mm, x) => Math.max(mm(x.nr) * 10, mm(x.description)), (x) => x.nr),
+        onPick: (it) => fill(it.mat),
       });
-      attachSuggest(name, {
-        source: (q) => materialSuggestions(q, (mm, x) => Math.max(mm(x.name) * 10, mm(x.nr)), (x) => x.name),
-        onPick: (it) => { fill(it.mat); qty.focus(); },
+      attachSuggest(desc, {
+        source: (q) => suggestMaterials(q, (mm, x) => Math.max(mm(x.description) * 10, mm(x.nr)), (x) => x.description),
+        onPick: (it) => fill(it.mat),
       });
-      attachSuggest(loc, {
-        source: (q) => {
-          const mm = matcher(q);
-          return store.locations()
-            .filter((l) => !q.trim() || mm(l))
-            .filter((l) => norm(l) !== norm(q))
-            .map((l) => ({ label: l, value: l }));
-        },
-        onPick: (it) => { loc.value = it.value; qty.focus(); },
-      });
-      nextOnEnter(nr, name, loc, qty);
+      locationSuggest(loc);
+      nextOnEnter(nr, desc, loc);
 
       const drawExisting = () => {
-        const box = $('#existing', root);
-        if (box) box.innerHTML = existingList();
+        const mats = sortedMaterials(a);
+        $('#existing', root).innerHTML = mats.length
+          ? `${sectionTitle('Bereits zugeordnet', mats.length)}<div class="card"><ul class="mats pad">${mats.map((m) => materialRow(m, { take: false })).join('')}</ul></div>`
+          : '';
       };
       const save = (andNext) => {
         err.textContent = '';
         try {
-          store.saveArticleItem(a.id, {
-            nr: nr.value, name: name.value, location: loc.value, qty: qty.value, replaceMaterialId: m?.id,
-          });
+          store.addMaterialToArticle(a.id, { nr: nr.value, description: desc.value, location: loc.value });
         } catch (ex) {
           err.textContent = ex.message;
           return;
         }
         if (andNext) {
           toast('Gespeichert – nächstes Material');
-          for (const el of [nr, name, loc, qty]) el.value = '';
-          auto = { name: null, loc: null, clearable: false };
+          for (const el of [nr, desc, loc]) el.value = '';
+          auto = { desc: null, loc: null };
           info.hidden = true;
           drawExisting();
           nr.focus();
@@ -975,32 +904,20 @@ function viewItemEdit(articleId, materialId) {
         }
       };
       $('#f', root).addEventListener('submit', (e) => { e.preventDefault(); save(false); });
-      $('#save-next', root)?.addEventListener('click', () => save(true));
-      $('#del', root)?.addEventListener('click', () => {
-        if (!confirm(`„${m.name || m.nr}“ vom Artikel ${a.code} entfernen?\n\nDas Material bleibt in der Materialliste erhalten.`)) return;
-        try {
-          store.removeArticleItem(a.id, m.id);
-          toast('Material entfernt');
-          back(`#/artikel/${a.id}`);
-        } catch (ex) {
-          toast(ex.message, 'error');
-        }
-      });
-
-      updateInfo();
+      $('#save-next', root).addEventListener('click', () => save(true));
       drawExisting();
-      if (!item) nr.focus();
+      nr.focus();
     },
   };
 }
 
 // ======================================================================
-// Material (Stammdaten)
+// Material
 // ======================================================================
 
 function viewMaterials(query) {
   const onlyOpen = new URLSearchParams(query || '').get('offen') === '1';
-  const sorts = [['location', 'Lagerort'], ['name', 'Bezeichnung'], ['nr', 'Nummer']];
+  const sorts = [['location', 'Lagerort'], ['description', 'Beschreibung'], ['nr', 'Nummer']];
   return {
     title: 'Material',
     tab: 'material',
@@ -1019,12 +936,15 @@ function viewMaterials(query) {
         const m = matcher(q);
         const key = prefs.materialSort;
         let list = store.materials().filter((x) => !onlyOpen || !x.location);
-        if (q.trim()) list = list.filter((x) => m(x.nr) || m(x.name) || m(x.location));
-        list = [...list].sort((x, y) => (key === 'location'
-          ? locCmp(x.location, y.location) || natCmp(x.name, y.name)
-          : natCmp(x[key], y[key]) || natCmp(x.name, y.name)));
+        if (q.trim()) list = list.filter((x) => m(x.nr) || m(x.description) || m(x.location));
+        list.sort((x, y) => (key === 'location'
+          ? locCmp(x.location, y.location) || natCmp(x.nr, y.nr)
+          : natCmp(x[key] || '~', y[key] || '~') || natCmp(x.nr, y.nr)));
         $('#list', root).innerHTML = list.length
-          ? `<div class="card"><ul class="mats pad">${list.map((x) => materialRow(x, { href: `#/material/${x.id}`, extra: usageText(x) })).join('')}</ul></div>`
+          ? `<div class="card"><ul class="mats pad">${list.map((x) => {
+            const used = store.articlesWithMaterial(x.id).map((a) => esc(a.name));
+            return materialRow(x, { note: used.length ? `für ${used.join(', ')}` : '<span class="warn-text">keinem Artikel zugeordnet</span>' });
+          }).join('')}</ul></div>`
           : store.materials().length
             ? emptyBox('Keine Treffer', onlyOpen ? 'Alle Materialien haben einen Lagerort.' : 'Filter anpassen oder löschen.')
             : emptyBox('Noch kein Material', 'Material legst du am einfachsten direkt beim Artikel an – oder tippe auf <b>+</b>.');
@@ -1040,82 +960,198 @@ function viewMaterials(query) {
       bindFilter(root, 'material', draw);
       syncSeg();
       draw();
+      return draw;
     },
   };
 }
 
-function viewMaterialEdit(id) {
+/** Material ansehen/bearbeiten (Artikelnummer, Beschreibung, Lagerort) + Entnehmen. */
+function viewMaterial(id, query) {
   const m = id ? store.getMaterial(id) : null;
   if (id && !m) return notFound('Material');
+  const fromArticle = store.getArticle(new URLSearchParams(query || '').get('artikel') || '');
   const used = m ? store.articlesWithMaterial(m.id) : [];
+  const inFromArticle = fromArticle && m && (fromArticle.materialIds || []).includes(m.id);
   return {
     title: m ? 'Material' : 'Neues Material',
-    back: '#/material',
+    back: fromArticle ? `#/artikel/${fromArticle.id}` : '#/material',
     tab: 'material',
+    form: true,
     html: `
+      ${m ? `<div class="detail-head mat-head">
+        ${locBadge(m.location)}
+        <div><span class="eyebrow">Artikelnummer</span><div class="detail-title small">${esc(m.nr)}</div>
+          ${m.description ? `<div class="detail-sub">${esc(m.description)}</div>` : ''}</div>
+      </div>
+      <div class="take-big" id="take-box">${takeButton(m)}</div>` : ''}
       <form class="card form" id="f" novalidate>
-        ${field({ id: 'nr', label: 'Materialnummer', value: m?.nr, placeholder: 'z. B. 001240007100', attrs: `${CODE_ATTRS} enterkeyhint="next"` })}
-        ${field({ id: 'name', label: 'Bezeichnung', value: m?.name, placeholder: 'z. B. Lagerbeutel 70x100', attrs: 'autocomplete="off" enterkeyhint="next"' })}
-        ${field({ id: 'loc', label: 'Lagerort', value: m?.location, placeholder: 'z. B. R3-F2', attrs: `${CODE_ATTRS} enterkeyhint="done"`, suggest: true,
+        ${field({ id: 'nr', label: 'Artikelnummer', value: m?.nr, placeholder: 'z. B. 001240007100', attrs: `${CODE_ATTRS} enterkeyhint="next"` })}
+        ${field({ id: 'desc', label: 'Beschreibung', optional: true, value: m?.description, placeholder: 'z. B. Lagerbeutel 70x100', attrs: 'autocomplete="off" enterkeyhint="next"' })}
+        ${field({ id: 'loc', label: 'Lagerort', optional: true, value: m?.location, placeholder: 'z. B. R3-F2', attrs: `${CODE_ATTRS} enterkeyhint="done"`, suggest: true,
           hint: used.length > 1 ? `Gilt für alle ${used.length} Artikel, die dieses Material verwenden.` : '' })}
         <p class="form-error" id="err" role="alert"></p>
         <button class="btn btn-primary btn-block" type="submit">Speichern</button>
       </form>
       ${m ? `${sectionTitle('Verwendet in', used.length)}
-        ${used.length ? `<ul class="card list">${used.map(articleRow).join('')}</ul>` : '<p class="hint">Wird in keinem Artikel verwendet.</p>'}
-        ${deleteButton('Material löschen')}` : ''}`,
+        ${used.length ? `<ul class="card list">${used.map(articleRow).join('')}</ul>` : '<p class="hint">Keinem Artikel zugeordnet.</p>'}
+        ${inFromArticle ? `<button type="button" class="btn btn-secondary btn-block" id="unlink">${icon.close}<span>Aus Artikel „${esc(fromArticle.name)}“ entfernen</span></button>` : ''}
+        ${deleteButton('Material ganz löschen')}` : ''}`,
     mount(root) {
       const nr = $('#nr', root);
-      const name = $('#name', root);
+      const desc = $('#desc', root);
       const loc = $('#loc', root);
-      attachSuggest(loc, {
-        source: (q) => {
-          const mm = matcher(q);
-          return store.locations()
-            .filter((l) => (!q.trim() || mm(l)) && norm(l) !== norm(q))
-            .map((l) => ({ label: l, value: l }));
-        },
-        onPick: (it) => { loc.value = it.value; },
-      });
-      nextOnEnter(nr, name, loc);
+      locationSuggest(loc);
+      nextOnEnter(nr, desc, loc);
       $('#f', root).addEventListener('submit', (e) => {
         e.preventDefault();
         try {
-          store.saveMaterial({ id: m?.id, nr: nr.value, name: name.value, location: loc.value });
+          store.saveMaterial({ id: m?.id, nr: nr.value, description: desc.value, location: loc.value });
           toast('Material gespeichert');
-          back('#/material');
+          back(fromArticle ? `#/artikel/${fromArticle.id}` : '#/material');
         } catch (ex) {
           $('#err', root).textContent = ex.message;
         }
       });
+      $('#unlink', root)?.addEventListener('click', () => {
+        store.removeMaterialFromArticle(fromArticle.id, m.id);
+        toast(`Aus „${fromArticle.name}“ entfernt`);
+        back(`#/artikel/${fromArticle.id}`);
+      });
       $('#del', root)?.addEventListener('click', () => {
         const extra = used.length ? `\n\nEs wird aus ${plural(used.length, 'Artikel', 'Artikeln')} entfernt.` : '';
-        if (!confirm(`Material „${m.name || m.nr}“ löschen?${extra}`)) return;
-        try {
-          store.deleteMaterial(m.id);
-          toast('Material gelöscht');
-          replace('#/material');
-        } catch (ex) {
-          toast(ex.message, 'error');
-        }
+        if (!confirm(`Material ${m.nr} ganz löschen?${extra}`)) return;
+        store.deleteMaterial(m.id);
+        toast('Material gelöscht');
+        replace('#/material');
       });
       if (!m) nr.focus();
+      // Nur den Entnehmen-Zähler auffrischen, nicht das Formular.
+      if (m) return () => { const box = $('#take-box', root); if (box && store.getMaterial(m.id)) box.innerHTML = takeButton(store.getMaterial(m.id)); };
+      return null;
     },
   };
 }
 
 // ======================================================================
-// Mehr: Datensicherung, App-Installation, Abmelden
+// Bestellliste
+// ======================================================================
+
+function viewOrderList() {
+  return {
+    title: 'Bestellliste',
+    tab: 'bestellliste',
+    action: `<button type="button" class="icon-btn" id="share" aria-label="Bestellliste teilen" title="Teilen">${icon.share}</button>
+      <a class="icon-btn" href="#/mehr" aria-label="Mehr" title="Mehr">${icon.gear}</a>`,
+    html: '<div id="list"></div>',
+    mount(root) {
+      const draw = () => {
+        const all = store.orderlist().filter((e) => store.getMaterial(e.materialId));
+        const byLoc = (x, y) => locCmp(store.getMaterial(x.materialId).location, store.getMaterial(y.materialId).location);
+        const open = all.filter((e) => e.status === 'offen').sort(byLoc);
+        const ordered = all.filter((e) => e.status === 'bestellt').sort((x, y) => (y.orderedAt || '').localeCompare(x.orderedAt || ''));
+        if (!all.length) {
+          $('#list', root).innerHTML = emptyBox('Bestellliste ist leer',
+            'Tippe überall, wo ein Lagerort steht, auf <b>Entnehmen</b> – das Material landet dann hier zum Nachbestellen.');
+          return;
+        }
+        $('#list', root).innerHTML = `
+          ${sectionTitle('Nachbestellen', open.length, open.length > 1 ? '<button type="button" class="link-btn" id="all-ordered">Alle bestellt</button>' : '')}
+          ${open.length ? `<ul class="card ol">${open.map(openEntry).join('')}</ul>` : '<p class="hint">Nichts offen.</p>'}
+          ${ordered.length ? `${sectionTitle('Bestellt', ordered.length)}<ul class="card ol">${ordered.map(orderedEntry).join('')}</ul>` : ''}`;
+      };
+      root.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-act]');
+        if (b) {
+          const { act, id } = b.dataset;
+          if (act === 'plus') store.changeQty(id, 1);
+          if (act === 'minus') store.changeQty(id, -1);
+          if (act === 'ordered') { store.markOrdered([id]); toast('Als bestellt markiert'); }
+          if (act === 'reopen') store.reopenEntry(id);
+          if (act === 'done') {
+            store.removeEntry(id);
+            toast('Erledigt – aus der Liste entfernt');
+          }
+          return;
+        }
+        if (e.target.closest('#all-ordered')) {
+          const open = store.orderlist().filter((x) => x.status === 'offen').map((x) => x.id);
+          if (confirm(`${plural(open.length, 'Position', 'Positionen')} als bestellt markieren?`)) {
+            store.markOrdered(open);
+            toast('Alle als bestellt markiert');
+          }
+        }
+      });
+      $('#share').addEventListener('click', shareOrderList);
+      draw();
+      return draw;
+    },
+  };
+}
+
+function entryMain(e) {
+  const m = store.getMaterial(e.materialId);
+  return `${locBadge(m.location)}
+    <a class="mat-body" href="#/material/${m.id}">
+      <span class="mat-name">${esc(materialTitle(m))}</span>
+      ${m.description ? `<span class="mat-meta">Nr. ${esc(m.nr)}</span>` : ''}
+      <span class="mat-note muted">${e.status === 'bestellt' ? `bestellt ${esc(formatDate(e.orderedAt))}` : `seit ${esc(formatDate(e.createdAt))}`}</span>
+    </a>`;
+}
+
+function openEntry(e) {
+  return `<li class="ol-item">
+    <div class="ol-top">${entryMain(e)}</div>
+    <div class="ol-actions">
+      <div class="stepper" role="group" aria-label="Menge">
+        <button type="button" data-act="minus" data-id="${e.id}" aria-label="weniger">${icon.minus}</button>
+        <b>${e.qty || 1}</b>
+        <button type="button" data-act="plus" data-id="${e.id}" aria-label="mehr">${icon.plus}</button>
+      </div>
+      <button type="button" class="btn btn-secondary btn-small" data-act="ordered" data-id="${e.id}">${icon.check}<span>Bestellt</span></button>
+    </div>
+  </li>`;
+}
+
+function orderedEntry(e) {
+  return `<li class="ol-item is-ordered">
+    <div class="ol-top">${entryMain(e)}<b class="ol-qty">${e.qty || 1}×</b></div>
+    <div class="ol-actions">
+      <button type="button" class="btn btn-ghost btn-small" data-act="reopen" data-id="${e.id}">${icon.undo}<span>Zurück</span></button>
+      <button type="button" class="btn btn-secondary btn-small" data-act="done" data-id="${e.id}">${icon.check}<span>Eingetroffen</span></button>
+    </div>
+  </li>`;
+}
+
+async function shareOrderList() {
+  const open = store.orderlist().filter((e) => e.status === 'offen' && store.getMaterial(e.materialId));
+  if (!open.length) { toast('Nichts zum Nachbestellen'); return; }
+  const lines = open.map((e) => {
+    const m = store.getMaterial(e.materialId);
+    return `• ${e.qty || 1}× ${m.nr}${m.description ? ` – ${m.description}` : ''}${m.location ? ` (${m.location})` : ''}`;
+  });
+  const text = `Bestellliste Konfektionierung – ${new Date().toLocaleDateString('de-DE')}\n\n${lines.join('\n')}`;
+  try {
+    if (matchMedia('(pointer: coarse)').matches && navigator.share) {
+      await navigator.share({ title: 'Bestellliste', text });
+    } else {
+      await navigator.clipboard.writeText(text);
+      toast('Bestellliste kopiert');
+    }
+  } catch (ex) {
+    if (ex.name !== 'AbortError') toast('Teilen nicht möglich', 'error');
+  }
+}
+
+// ======================================================================
+// Mehr: Datenbestand, Export, App-Installation, Abmelden
 // ======================================================================
 
 const isInstalled = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 
 function viewMore() {
-  const meta = store.meta();
-  const stale = !store.isEmpty() && daysSince(meta.lastBackup) > 7;
   return {
     title: 'Mehr',
-    tab: 'mehr',
+    back: '#/suche',
     html: `
       ${sectionTitle('Datenbestand')}
       <div class="card stats">
@@ -1124,59 +1160,36 @@ function viewMore() {
         <a href="#/material"><b>${store.materials().length}</b><span>Materialien</span></a>
       </div>
 
-      ${sectionTitle('Datensicherung')}
+      ${sectionTitle('Speicherung')}
       <div class="card box">
-        <p>Die Daten werden <b>nur auf diesem Gerät</b> gespeichert. Sichere sie regelmäßig –
-          mit der Backup-Datei kannst du sie auch auf ein anderes Handy übertragen.</p>
-        <p class="backup-state${stale ? ' is-stale' : ''}">${icon.info}
-          <span>Letztes Backup: <b>${meta.lastBackup ? esc(formatDate(meta.lastBackup)) : 'noch keins'}</b></span></p>
-        <button type="button" class="btn btn-primary btn-block" id="export">${icon.download}<span>Backup speichern</span></button>
-        <button type="button" class="btn btn-secondary btn-block" id="import">${icon.upload}<span>Backup einspielen</span></button>
-        <input type="file" id="import-file" accept=".json,application/json" hidden>
+        <p>Die Daten liegen <b>online</b> (Firebase, Rechenzentrum Frankfurt). Alle Mitarbeiter sehen dieselben Daten,
+          Änderungen erscheinen sofort auf allen Handys.</p>
+        <p>Ohne Empfang funktioniert die App weiter – Änderungen werden übertragen, sobald wieder Verbindung besteht.</p>
+        <button type="button" class="btn btn-secondary btn-block" id="export">${icon.download}<span>Sicherungskopie herunterladen</span></button>
       </div>
 
       ${isInstalled() ? '' : `${sectionTitle('Als App aufs Handy')}
       <div class="card box">
-        <p><b>iPhone (Safari):</b> „Teilen“ ${icon.upload} → „Zum Home-Bildschirm“.</p>
+        <p><b>iPhone (Safari):</b> „Teilen“ ${icon.share} → „Zum Home-Bildschirm“.</p>
         <p><b>Android (Chrome):</b> Menü ⋮ → „App installieren“ oder „Zum Startbildschirm hinzufügen“.</p>
-        <p class="hint">Als App startet sie schneller und funktioniert auch ohne Empfang. Auf dem iPhone
-          hat die App einen <b>eigenen Speicher</b>: am besten zuerst installieren und dann Daten eintragen –
-          oder vorhandene Daten per Backup übertragen.</p>
+        <p class="hint">Danach einmal mit dem Passwort anmelden.</p>
       </div>`}
 
       <button type="button" class="btn btn-secondary btn-block" id="logout">${icon.logout}<span>Abmelden</span></button>
       <p class="version">BO-WERT Konfektionierung · v${APP_VERSION}</p>`,
     mount(root) {
       $('#export', root).addEventListener('click', exportBackup);
-      const file = $('#import-file', root);
-      $('#import', root).addEventListener('click', () => file.click());
-      file.addEventListener('change', async () => {
-        const f = file.files[0];
-        file.value = '';
-        if (!f) return;
-        try {
-          const next = store.parseBackup(await f.text());
-          const summary = `${plural(next.orders.length, 'Auftrag', 'Aufträge')}, ${next.articles.length} Artikel, ${plural(next.materials.length, 'Material', 'Materialien')}`;
-          if (!confirm(`Backup einspielen?\n\n${summary}\n\nDie aktuellen Daten auf diesem Gerät werden dabei ersetzt.`)) return;
-          store.replaceAll(next);
-          toast('Backup eingespielt');
-          render();
-        } catch (ex) {
-          toast(ex.message, 'error');
-        }
-      });
       $('#logout', root).addEventListener('click', logout);
     },
   };
 }
 
 async function exportBackup() {
-  const name = `konfektionierung-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  const name = `konfektionierung-${new Date().toISOString().slice(0, 10)}.json`;
   const file = new File([store.exportJSON()], name, { type: 'application/json' });
   try {
-    // Am Handy: Teilen-Menü (Dateien, Mail, Messenger). Sonst: normaler Download.
     if (matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
-      await navigator.share({ files: [file], title: 'Konfektionierung – Backup' });
+      await navigator.share({ files: [file], title: 'Konfektionierung – Sicherung' });
     } else {
       const url = URL.createObjectURL(file);
       const link = Object.assign(document.createElement('a'), { href: url, download: name });
@@ -1185,11 +1198,8 @@ async function exportBackup() {
       link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
     }
-    store.markBackup();
-    toast('Backup erstellt');
-    render();
   } catch (ex) {
-    if (ex.name !== 'AbortError') toast(`Backup fehlgeschlagen: ${ex.message}`, 'error');
+    if (ex.name !== 'AbortError') toast(`Sicherung fehlgeschlagen: ${ex.message}`, 'error');
   }
 }
 
@@ -1199,6 +1209,22 @@ async function exportBackup() {
 
 for (const tab of $$('.tab')) tab.insertAdjacentHTML('afterbegin', icon[tab.dataset.icon]);
 $('#back').innerHTML = icon.back;
+
+// „Entnehmen“ – funktioniert überall, wo ein Lagerort steht.
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-take]');
+  if (!b) return;
+  e.preventDefault();
+  const m = store.getMaterial(b.dataset.take);
+  if (!m) return;
+  const qty = store.takeMaterial(m.id);
+  navigator.vibrate?.(25);
+  for (const btn of $$(`[data-take="${m.id}"]`)) btn.outerHTML = takeButton(m);
+  toast(`${materialTitle(m)}: ${qty}× auf der Bestellliste`, 'ok', {
+    label: 'Rückgängig',
+    run: () => store.changeOpenQty(m.id, -1),
+  });
+});
 
 // Erneutes Tippen auf den aktiven Tab: Suche fokussieren bzw. nach oben scrollen.
 $('.tabbar').addEventListener('click', (e) => {
@@ -1220,16 +1246,35 @@ document.addEventListener('focusout', () => {
   }, 60);
 });
 
+window.addEventListener('online', updateChrome);
+window.addEventListener('offline', updateChrome);
+
 history.scrollRestoration = 'manual';
 if (!location.hash) history.replaceState(null, '', '#/suche');
 stack = [currentHash()];
 window.addEventListener('hashchange', onHashChange);
 
-if (store.storageProblem()) {
-  toast('Speichern ist in diesem Browser nicht möglich (privater Modus?).', 'error');
-}
-if (isAuthed()) showApp(); else showLogin();
+store.onChange(scheduleRefresh);
+store.onError((ex) => {
+  console.error(ex);
+  if (ex.code === 'permission-denied') toast('Keine Berechtigung – bitte neu anmelden.', 'error');
+  else toast(`Fehler beim Speichern: ${ex.message}`, 'error');
+});
+
+store.watchAuth((user) => {
+  if (user) {
+    store.startSync();
+    showScreen('app');
+    render();
+  } else {
+    store.stopSync();
+    showLogin();
+  }
+});
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  const hadController = Boolean(navigator.serviceWorker.controller);
   navigator.serviceWorker.register('./sw.js').catch((e) => console.warn('Service Worker:', e));
+  // Neue Version aktiv → einmal neu laden, damit alle Dateien zusammenpassen.
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) location.reload(); });
 }

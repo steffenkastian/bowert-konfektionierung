@@ -1,61 +1,65 @@
 # BO-WERT Konfektionierung
 
-Handy-Web-App für die Konfektionierung: Zu einer **Auftragsnummer** sofort sehen, welche **Artikel** dazugehören,
-welches **Verpackungsmaterial** sie brauchen und **wo es im Lager liegt**.
+Handy-Web-App für die Konfektionierung: Zu einer **Auftragsnummer** sofort sehen, welcher **Artikel** dazugehört,
+welche **Materialien** gebraucht werden und **wo sie im Lager liegen** – und entnommenes Material direkt auf die
+**Bestellliste** setzen. Alle Mitarbeiter arbeiten mit denselben Daten.
 
-**App:** https://steffenkastian.github.io/bowert-konfektionierung/
+**App:** https://steffenkastian.github.io/bowert-konfektionierung/ · Passwort: `bowert`
+
+## Struktur
+
+```
+Auftragsnummer  ──►  Artikelbezeichnung (z. B. „5er“, „200er“)  ──►  Materialien (Artikelnummern)
+                                                                      ├─ Beschreibung (optional)
+                                                                      └─ Lagerort     (optional)
+```
+
+Ein Material (Artikelnummer) wird nur einmal gepflegt. Ändert sich sein Lagerort, gilt das für alle Artikel.
 
 ## Bedienung
 
 | Bereich | Wofür |
 | --- | --- |
-| **Suche** (Start) | Auftragsnummer, ArtikelID, Materialnummer oder Lagerort eintippen. Treffer zeigen Material + Lagerort direkt. „202878“ findet auch „630-202878X“. Mit **123** auf die Zahlentastatur umschalten. |
-| **Aufträge** | Auftrag anlegen, ArtikelID(s) zuordnen. Unbekannte ArtikelIDs werden automatisch angelegt. Bei mehreren Artikeln: Ansicht **„Nach Lagerort“** = Pickliste in Laufreihenfolge. |
-| **Artikel** | Pro Artikel die Verpackungsmaterialien hinterlegen (Nummer, Bezeichnung, Lagerort, Menge). „Speichern & nächstes Material“ für schnelle Eingabe. |
-| **Material** | Alle Materialien mit Lagerort. Ein Lagerort wird nur einmal gepflegt und gilt für alle Artikel, die das Material nutzen. |
-| **Mehr** | Backup speichern/einspielen, Anleitung „Als App installieren“, Abmelden. |
+| **Suche** (Start) | Auftragsnummer, Artikelbezeichnung, Artikelnummer oder Lagerort eintippen. „202878“ findet auch „630-202878X“. **123** schaltet auf die Zahlentastatur. |
+| **Aufträge** | Auftrag anlegen und Artikelbezeichnung zuordnen – beim Tippen („5“) werden passende Artikel vorgeschlagen, inkl. Vorschau der Materialien. Unbekannte Bezeichnungen werden neu angelegt. |
+| **Artikel** | Materialien per Artikelnummer zuordnen. Bekannte Nummern füllen Beschreibung und Lagerort automatisch aus. |
+| **Material** | Alle Materialien mit Lagerort, sortierbar. |
+| **Bestellliste** | Überall, wo ein Lagerort steht, gibt es **Entnehmen** → das Material landet hier (mehrfach tippen = Menge +1). Menge anpassen, als *bestellt* markieren, bei Eintreffen abhaken, Liste per WhatsApp/Mail **teilen**. |
+| ⚙ **Mehr** | Datenbestand, Sicherungskopie (JSON), Anleitung „Als App installieren“, Abmelden. |
 
-Passwort: `bowert` (Groß-/Kleinschreibung egal). Die Anmeldung bleibt auf dem Gerät gespeichert.
+## Speicherung & Sicherheit
 
-## Wichtig zu wissen
-
-- **Daten liegen nur auf dem Gerät** (localStorage im Browser), nicht im Internet und nicht in diesem Repository.
-  Regelmäßig unter *Mehr → Backup speichern* sichern. Mit der Backup-Datei lassen sich Daten auf ein anderes Gerät übertragen.
-- **iPhone:** Eine zum Home-Bildschirm hinzugefügte App hat einen **eigenen Speicher**, getrennt von Safari.
-  Am besten zuerst installieren, dann Daten eintragen.
-- **Passwort ist nur ein Sichtschutz.** Der Code auf GitHub Pages ist öffentlich; das Passwort hält Neugierige fern,
-  schützt aber nicht vor jemandem, der den Quelltext liest. Die Auftragsdaten selbst sind nie öffentlich (sie liegen nur auf dem Handy).
-- **Offline-fähig:** Nach dem ersten Öffnen funktioniert die App auch ohne Empfang.
+- Daten liegen in **Firebase Firestore** (Projekt `bowert-konfektionierung`, Region Frankfurt `europe-west3`),
+  kostenloser Spark-Tarif. Änderungen erscheinen sofort auf allen Handys.
+- **Offline-fähig:** Ohne Empfang läuft die App mit den zuletzt geladenen Daten weiter; Änderungen werden
+  übertragen, sobald wieder Verbindung besteht (Anzeige „Offline“ / „Sync“ oben).
+- **Login:** gemeinsames Team-Konto `konfektionierung@bowert-gmbh.de`, in der App wird nur das Passwort eingegeben.
+  Das Passwort prüft der Firebase-Server; die Regeln in [`firestore.rules`](firestore.rules) lassen nur dieses
+  Konto lesen/schreiben. Passwort ändern: Firebase-Konsole → Authentication → Nutzer.
+- Die Firebase-Konfiguration in `js/config.js` ist absichtlich öffentlich (so funktionieren alle Firebase-Web-Apps).
 
 ## Technik
 
-Reines HTML/CSS/JavaScript ohne Build-Schritt – läuft direkt auf GitHub Pages.
+Reines HTML/CSS/JavaScript ohne Build-Schritt, Firebase-SDK direkt vom Google-CDN.
 
 ```
 index.html             Grundgerüst (Login, Kopfzeile, Tab-Leiste)
 css/app.css            Gestaltung (mobil zuerst, Hell/Dunkel)
 js/app.js              Routing, Login, alle Ansichten
-js/store.js            Datenmodell + Speicherung (localStorage), Backup
-js/ui.js               Helfer: Suche, Sortierung, Icons, Vorschlagslisten
-sw.js                  Service Worker (Offline-Cache)
-manifest.webmanifest   App-Installation (PWA)
+js/store.js            Firestore: Live-Abgleich, Speichern, Bestellliste
+js/config.js           Firebase-Projektdaten + Team-Konto
+js/ui.js               Helfer: Suche, Sortierung, Icons, Vorschläge
+sw.js                  Service Worker (App-Dateien offline)
+firestore.rules        Zugriffsregeln der Datenbank
 ```
 
-Datenmodell (`js/store.js`):
+**Neue Version veröffentlichen:** committen und pushen, vorher in `sw.js` die Konstante `CACHE` hochzählen
+(z. B. `konf-v3`), damit installierte Apps die neuen Dateien laden.
+**Regeln ändern:** `firebase deploy --only firestore`.
 
-```
-materials: { id, nr, name, location }               Stammdaten, Lagerort gilt überall
-articles:  { id, code, name, items: [{ materialId, qty }] }
-orders:    { id, nr, note, articleIds: [] }
-```
-
-**Neue Version veröffentlichen:** Änderungen committen und pushen. Danach in `sw.js` die Konstante `CACHE`
-hochzählen (z. B. `konf-v2`), damit installierte Apps die neuen Dateien laden.
-
-Lokal testen: `python -m http.server 8000` im Ordner starten und http://localhost:8000 öffnen
-(der Service Worker ist lokal absichtlich aus).
+**Kostenlos-Grenzen (Spark):** 50.000 Lesevorgänge und 20.000 Schreibvorgänge pro Tag – für ein Team mit einigen
+Hundert Aufträgen/Materialien reichlich.
 
 ## Geplant
 
-- **Paletten-Erfassung:** fertige Palette pro Auftrag mit einem Tipp notieren, Tagesübersicht am Abend
-  (Datenmodell ist dafür vorbereitet: `pallets` kommt als weitere Liste dazu).
+- **Paletten-Erfassung:** fertige Palette pro Auftrag notieren, Tagesübersicht am Abend (weitere Sammlung `pallets`).

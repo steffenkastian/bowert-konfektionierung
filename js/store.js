@@ -1,294 +1,325 @@
-// Datenhaltung der Konfektionierungs-App.
+// Datenhaltung: Firebase Firestore (online, für alle Mitarbeiter gemeinsam, mit Offline-Cache).
 //
-// Alle Daten liegen im localStorage des Geräts. Struktur (version 1):
-//   materials: [{ id, nr, name, location }]          Verpackungsmaterial-Stammdaten (Lagerort gilt überall)
-//   articles:  [{ id, code, name, items: [{ materialId, qty }] }]
-//   orders:    [{ id, nr, note, articleIds: [] }]
-//   meta:      { lastBackup }
-// Später kommt hier z. B. `pallets: [{ id, orderId, articleId, at }]` für die Tagesübersicht dazu.
+// Struktur:
+//   orders/{id}     { nr, articleId, note }               Auftragsnummer → eine Artikelbezeichnung
+//   articles/{id}   { name, materialIds: [] }             Artikelbezeichnung (z. B. „5er“) → Materialien
+//   materials/{id}  { nr, description, location }         Artikelnummer + optionale Beschreibung/Lagerort
+//   orderlist/{id}  { materialId, qty, status }           Bestellliste: status „offen“ | „bestellt“
+//                   offene Einträge haben die feste ID „offen-<materialId>“, damit mehrere Handys
+//                   gleichzeitig hochzählen können, ohne doppelte Zeilen zu erzeugen.
 
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+import {
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut,
+} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+import {
+  initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+  collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, writeBatch,
+  increment, arrayUnion, arrayRemove,
+} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+import { firebaseConfig, TEAM_EMAIL } from './config.js';
 import { norm, natCmp } from './ui.js';
 
-const KEY = 'konf.data.v1';
-const BEFORE_IMPORT_KEY = 'konf.data.v1.vor-import';
-export const DATA_VERSION = 1;
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+});
+
+const COLLECTIONS = ['orders', 'articles', 'materials', 'orderlist'];
+const data = Object.fromEntries(COLLECTIONS.map((c) => [c, new Map()]));
+const meta = {};
+const loaded = new Set();
+const listeners = new Set();
+let unsubscribers = [];
+let errorHandler = (e) => console.error(e);
 
 const now = () => new Date().toISOString();
 const str = (v) => (v == null ? '' : String(v).trim());
-export const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const newId = (col) => doc(collection(db, col)).id;
 
-function emptyData() {
-  return { version: DATA_VERSION, orders: [], articles: [], materials: [], meta: { lastBackup: null } };
+function emit() { listeners.forEach((fn) => fn()); }
+
+/** Schreibvorgänge nicht abwarten (offline bleiben sie bis zur Verbindung offen), Fehler aber melden. */
+const run = (promise) => { promise.catch((e) => errorHandler(e)); };
+
+export const onChange = (fn) => listeners.add(fn);
+export const onError = (fn) => { errorHandler = fn; };
+
+// ---------- Anmeldung ----------
+
+export const watchAuth = (cb) => onAuthStateChanged(auth, cb);
+export const login = (password) => signInWithEmailAndPassword(auth, TEAM_EMAIL, password);
+export async function logout() {
+  stopSync();
+  await signOut(auth);
 }
 
-/** Bringt gespeicherte oder importierte Daten in eine saubere, in sich stimmige Form. */
-function sanitize(raw) {
-  if (!raw || typeof raw !== 'object') throw new Error('Keine gültigen Daten.');
-  const list = (v) => (Array.isArray(v) ? v : []);
-  const uniqueIds = () => {
-    const seen = new Set();
-    return (x) => x && typeof x.id === 'string' && x.id && !seen.has(x.id) && seen.add(x.id);
-  };
-  const stamp = (x) => ({ createdAt: x.createdAt || now(), updatedAt: x.updatedAt || now() });
+// ---------- Live-Abgleich ----------
 
-  const materials = list(raw.materials).filter(uniqueIds()).map((m) => ({
-    id: m.id, nr: str(m.nr), name: str(m.name), location: str(m.location), ...stamp(m),
-  }));
-  const materialIds = new Set(materials.map((m) => m.id));
-
-  const articles = list(raw.articles).filter(uniqueIds()).map((a) => {
-    const seenItems = new Set();
-    const items = list(a.items)
-      .filter((it) => it && materialIds.has(it.materialId) && !seenItems.has(it.materialId) && seenItems.add(it.materialId))
-      .map((it) => ({ materialId: it.materialId, qty: str(it.qty) }));
-    return { id: a.id, code: str(a.code), name: str(a.name), items, ...stamp(a) };
-  });
-  const articleIds = new Set(articles.map((a) => a.id));
-
-  const orders = list(raw.orders).filter(uniqueIds()).map((o) => ({
-    id: o.id,
-    nr: str(o.nr),
-    note: str(o.note),
-    articleIds: [...new Set(list(o.articleIds).filter((id) => articleIds.has(id)))],
-    ...stamp(o),
-  }));
-
-  return {
-    version: DATA_VERSION,
-    orders,
-    articles,
-    materials,
-    meta: { lastBackup: raw.meta?.lastBackup ?? null },
-  };
-}
-
-let storageError = null;
-let data = load();
-
-function load() {
-  let raw;
-  try {
-    raw = localStorage.getItem(KEY);
-  } catch (e) {
-    storageError = e;
-    return emptyData();
-  }
-  if (!raw) return emptyData();
-  try {
-    return sanitize(JSON.parse(raw));
-  } catch (e) {
-    // Defekte Daten nicht stillschweigend überschreiben, sondern beiseitelegen.
-    console.error('Gespeicherte Daten unlesbar', e);
-    try { localStorage.setItem(`${KEY}.defekt-${Date.now()}`, raw); } catch { /* ignorieren */ }
-    return emptyData();
+export function startSync() {
+  stopSync();
+  for (const name of COLLECTIONS) {
+    unsubscribers.push(onSnapshot(collection(db, name), { includeMetadataChanges: true }, (snap) => {
+      const map = data[name];
+      map.clear();
+      for (const d of snap.docs) map.set(d.id, { id: d.id, ...d.data() });
+      meta[name] = snap.metadata;
+      loaded.add(name);
+      emit();
+    }, (err) => errorHandler(err)));
   }
 }
 
-function persist() {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(data));
-  } catch (e) {
-    console.error(e);
-    throw new Error('Speichern fehlgeschlagen – der Gerätespeicher ist voll oder gesperrt.');
-  }
+export function stopSync() {
+  unsubscribers.forEach((u) => u());
+  unsubscribers = [];
 }
 
-export const storageProblem = () => storageError;
+export const isReady = () => loaded.size === COLLECTIONS.length;
+export const syncState = () => ({
+  pending: Object.values(meta).some((m) => m?.hasPendingWrites),
+  fromCache: Object.values(meta).some((m) => m?.fromCache),
+});
 
 // ---------- Lesen ----------
 
-export const orders = () => data.orders;
-export const articles = () => data.articles;
-export const materials = () => data.materials;
-export const meta = () => data.meta;
+export const orders = () => [...data.orders.values()];
+export const articles = () => [...data.articles.values()];
+export const materials = () => [...data.materials.values()];
+export const orderlist = () => [...data.orderlist.values()];
 
-export const getOrder = (id) => data.orders.find((o) => o.id === id);
-export const getArticle = (id) => data.articles.find((a) => a.id === id);
-export const getMaterial = (id) => data.materials.find((m) => m.id === id);
+export const getOrder = (id) => data.orders.get(id);
+export const getArticle = (id) => data.articles.get(id);
+export const getMaterial = (id) => data.materials.get(id);
 
-export const findOrderByNr = (nr) => (norm(nr) ? data.orders.find((o) => norm(o.nr) === norm(nr)) : undefined);
-export const findArticleByCode = (code) => (norm(code) ? data.articles.find((a) => norm(a.code) === norm(code)) : undefined);
-export const findMaterialByNr = (nr) => (norm(nr) ? data.materials.find((m) => norm(m.nr) === norm(nr)) : undefined);
+export const findOrderByNr = (nr) => (norm(nr) ? orders().find((o) => norm(o.nr) === norm(nr)) : undefined);
+export const findArticleByName = (name) => (norm(name) ? articles().find((a) => norm(a.name) === norm(name)) : undefined);
+export const findMaterialByNr = (nr) => (norm(nr) ? materials().find((m) => norm(m.nr) === norm(nr)) : undefined);
 
-export const ordersWithArticle = (articleId) => data.orders.filter((o) => o.articleIds.includes(articleId));
+export const articleMaterials = (a) => (a?.materialIds || []).map(getMaterial).filter(Boolean);
+export const ordersWithArticle = (articleId) => orders().filter((o) => o.articleId === articleId);
 export const articlesWithMaterial = (materialId) =>
-  data.articles.filter((a) => a.items.some((it) => it.materialId === materialId));
+  articles().filter((a) => (a.materialIds || []).includes(materialId));
 
-export const locations = () =>
-  [...new Set(data.materials.map((m) => m.location).filter(Boolean))].sort(natCmp);
-
-export const isEmpty = () => !data.orders.length && !data.articles.length && !data.materials.length;
+export const locations = () => [...new Set(materials().map((m) => m.location).filter(Boolean))].sort(natCmp);
+export const isEmpty = () => !data.orders.size && !data.articles.size && !data.materials.size;
 
 // ---------- Aufträge ----------
 
-/**
- * Speichert einen Auftrag. `articleCodes` sind ArtikelIDs als Text –
- * noch unbekannte ArtikelIDs werden dabei als neue Artikel angelegt.
- */
-export function saveOrder({ id, nr, note, articleCodes }) {
+/** Speichert einen Auftrag. Eine noch unbekannte Artikelbezeichnung wird dabei neu angelegt. */
+export function saveOrder({ id, nr, note, articleName }) {
   nr = str(nr);
+  articleName = str(articleName);
   if (!nr) throw new Error('Bitte eine Auftragsnummer eingeben.');
+  if (!articleName) throw new Error('Bitte eine Artikelbezeichnung wählen oder eingeben.');
   const dupe = findOrderByNr(nr);
   if (dupe && dupe.id !== id) throw new Error(`Auftrag ${dupe.nr} gibt es schon.`);
 
-  const articleIds = [];
-  for (const code of articleCodes.map(str).filter(Boolean)) {
-    let a = findArticleByCode(code);
-    if (!a) {
-      a = { id: uid(), code, name: '', items: [], createdAt: now(), updatedAt: now() };
-      data.articles.push(a);
-    }
-    if (!articleIds.includes(a.id)) articleIds.push(a.id);
+  const batch = writeBatch(db);
+  let article = findArticleByName(articleName);
+  if (!article) {
+    article = { id: newId('articles'), name: articleName, materialIds: [], createdAt: now(), updatedAt: now() };
+    batch.set(doc(db, 'articles', article.id), withoutId(article));
+    data.articles.set(article.id, article);
   }
-
-  let o = id ? getOrder(id) : null;
-  if (o) {
-    Object.assign(o, { nr, note: str(note), articleIds, updatedAt: now() });
-  } else {
-    o = { id: uid(), nr, note: str(note), articleIds, createdAt: now(), updatedAt: now() };
-    data.orders.push(o);
-  }
-  persist();
-  return o;
+  const orderId = id || newId('orders');
+  const fields = { nr, note: str(note), articleId: article.id, updatedAt: now() };
+  if (!id) fields.createdAt = now();
+  batch.set(doc(db, 'orders', orderId), fields, { merge: true });
+  data.orders.set(orderId, { ...data.orders.get(orderId), id: orderId, ...fields });
+  run(batch.commit());
+  emit();
+  return data.orders.get(orderId);
 }
 
 export function deleteOrder(id) {
-  data.orders = data.orders.filter((o) => o.id !== id);
-  persist();
+  run(deleteDoc(doc(db, 'orders', id)));
+  data.orders.delete(id);
+  emit();
 }
 
 // ---------- Artikel ----------
 
-export function saveArticle({ id, code, name }) {
-  code = str(code);
-  if (!code) throw new Error('Bitte eine ArtikelID eingeben.');
-  const dupe = findArticleByCode(code);
-  if (dupe && dupe.id !== id) throw new Error(`ArtikelID ${dupe.code} gibt es schon.`);
-
-  let a = id ? getArticle(id) : null;
-  if (a) {
-    Object.assign(a, { code, name: str(name), updatedAt: now() });
-  } else {
-    a = { id: uid(), code, name: str(name), items: [], createdAt: now(), updatedAt: now() };
-    data.articles.push(a);
-  }
-  persist();
-  return a;
+export function saveArticle({ id, name }) {
+  name = str(name);
+  if (!name) throw new Error('Bitte eine Artikelbezeichnung eingeben.');
+  const dupe = findArticleByName(name);
+  if (dupe && dupe.id !== id) throw new Error(`Artikel „${dupe.name}“ gibt es schon.`);
+  const articleId = id || newId('articles');
+  const fields = { name, updatedAt: now() };
+  if (!id) Object.assign(fields, { materialIds: [], createdAt: now() });
+  run(setDoc(doc(db, 'articles', articleId), fields, { merge: true }));
+  data.articles.set(articleId, { materialIds: [], ...data.articles.get(articleId), id: articleId, ...fields });
+  emit();
+  return data.articles.get(articleId);
 }
 
 export function deleteArticle(id) {
-  data.articles = data.articles.filter((a) => a.id !== id);
-  for (const o of data.orders) o.articleIds = o.articleIds.filter((x) => x !== id);
-  persist();
+  const batch = writeBatch(db);
+  batch.delete(doc(db, 'articles', id));
+  for (const o of ordersWithArticle(id)) {
+    batch.update(doc(db, 'orders', o.id), { articleId: '', updatedAt: now() });
+    o.articleId = '';
+  }
+  run(batch.commit());
+  data.articles.delete(id);
+  emit();
 }
 
 /**
- * Hinterlegt ein Verpackungsmaterial an einem Artikel.
- * Gibt es die Materialnummer schon, wird das bestehende Material verwendet
- * (und dessen Bezeichnung/Lagerort aktualisiert) – sonst wird es neu angelegt.
- * `replaceMaterialId`: beim Bearbeiten das bisher verknüpfte Material.
+ * Ordnet einem Artikel ein Material (per Artikelnummer) zu. Gibt es die Nummer schon,
+ * wird das bestehende Material verwendet und Beschreibung/Lagerort aktualisiert.
  */
-export function saveArticleItem(articleId, { nr, name, location, qty, replaceMaterialId }) {
+export function addMaterialToArticle(articleId, { nr, description, location }) {
   const a = getArticle(articleId);
   if (!a) throw new Error('Artikel nicht gefunden.');
-  nr = str(nr); name = str(name); location = str(location); qty = str(qty);
-  if (!nr && !name) throw new Error('Bitte Materialnummer oder Bezeichnung eingeben.');
+  nr = str(nr);
+  if (!nr) throw new Error('Bitte die Artikelnummer des Materials eingeben.');
 
+  const batch = writeBatch(db);
   let m = findMaterialByNr(nr);
-  if (!m && !nr) {
-    const prev = replaceMaterialId && getMaterial(replaceMaterialId);
-    m = prev && !prev.nr ? prev : data.materials.find((x) => !x.nr && norm(x.name) === norm(name));
-  }
+  const fields = { nr, description: str(description), location: str(location), updatedAt: now() };
   if (m) {
-    if (name) m.name = name;
-    m.location = location;
-    m.updatedAt = now();
+    batch.set(doc(db, 'materials', m.id), fields, { merge: true });
+    Object.assign(m, fields);
   } else {
-    m = { id: uid(), nr, name, location, createdAt: now(), updatedAt: now() };
-    data.materials.push(m);
+    m = { id: newId('materials'), ...fields, createdAt: now() };
+    batch.set(doc(db, 'materials', m.id), withoutId(m));
+    data.materials.set(m.id, m);
   }
-
-  const existing = a.items.findIndex((it) => it.materialId === m.id);
-  const previous = replaceMaterialId ? a.items.findIndex((it) => it.materialId === replaceMaterialId) : -1;
-  if (existing >= 0) {
-    a.items[existing].qty = qty;
-    if (previous >= 0 && previous !== existing) a.items.splice(previous, 1);
-  } else if (previous >= 0) {
-    a.items[previous] = { materialId: m.id, qty };
-  } else {
-    a.items.push({ materialId: m.id, qty });
-  }
-  a.updatedAt = now();
-  persist();
+  batch.update(doc(db, 'articles', a.id), { materialIds: arrayUnion(m.id), updatedAt: now() });
+  a.materialIds = [...new Set([...(a.materialIds || []), m.id])];
+  run(batch.commit());
+  emit();
   return m;
 }
 
-export function removeArticleItem(articleId, materialId) {
+export function removeMaterialFromArticle(articleId, materialId) {
   const a = getArticle(articleId);
   if (!a) return;
-  a.items = a.items.filter((it) => it.materialId !== materialId);
-  a.updatedAt = now();
-  persist();
+  run(updateDoc(doc(db, 'articles', articleId), { materialIds: arrayRemove(materialId), updatedAt: now() }));
+  a.materialIds = (a.materialIds || []).filter((x) => x !== materialId);
+  emit();
 }
 
 // ---------- Material ----------
 
-export function saveMaterial({ id, nr, name, location }) {
-  nr = str(nr); name = str(name); location = str(location);
-  if (!nr && !name) throw new Error('Bitte Materialnummer oder Bezeichnung eingeben.');
+export function saveMaterial({ id, nr, description, location }) {
+  nr = str(nr);
+  if (!nr) throw new Error('Bitte die Artikelnummer eingeben.');
   const dupe = findMaterialByNr(nr);
-  if (dupe && dupe.id !== id) throw new Error(`Materialnummer ${dupe.nr} gibt es schon.`);
-
-  let m = id ? getMaterial(id) : null;
-  if (m) {
-    Object.assign(m, { nr, name, location, updatedAt: now() });
-  } else {
-    m = { id: uid(), nr, name, location, createdAt: now(), updatedAt: now() };
-    data.materials.push(m);
-  }
-  persist();
-  return m;
+  if (dupe && dupe.id !== id) throw new Error(`Artikelnummer ${dupe.nr} gibt es schon.`);
+  const materialId = id || newId('materials');
+  const fields = { nr, description: str(description), location: str(location), updatedAt: now() };
+  if (!id) fields.createdAt = now();
+  run(setDoc(doc(db, 'materials', materialId), fields, { merge: true }));
+  data.materials.set(materialId, { ...data.materials.get(materialId), id: materialId, ...fields });
+  emit();
+  return data.materials.get(materialId);
 }
 
 export function deleteMaterial(id) {
-  data.materials = data.materials.filter((m) => m.id !== id);
-  for (const a of data.articles) a.items = a.items.filter((it) => it.materialId !== id);
-  persist();
+  const batch = writeBatch(db);
+  batch.delete(doc(db, 'materials', id));
+  for (const a of articlesWithMaterial(id)) {
+    batch.update(doc(db, 'articles', a.id), { materialIds: arrayRemove(id), updatedAt: now() });
+    a.materialIds = a.materialIds.filter((x) => x !== id);
+  }
+  for (const e of orderlist().filter((x) => x.materialId === id)) {
+    batch.delete(doc(db, 'orderlist', e.id));
+    data.orderlist.delete(e.id);
+  }
+  run(batch.commit());
+  data.materials.delete(id);
+  emit();
 }
 
-// ---------- Datensicherung ----------
+// ---------- Bestellliste ----------
+
+const openId = (materialId) => `offen-${materialId}`;
+export const openQty = (materialId) => data.orderlist.get(openId(materialId))?.qty || 0;
+
+/** „Entnehmen“: Material landet auf der Bestellliste (bzw. Menge +1). Gibt die neue Menge zurück. */
+export function takeMaterial(materialId) {
+  const id = openId(materialId);
+  const existing = data.orderlist.get(id);
+  const fields = { materialId, status: 'offen', qty: increment(1), updatedAt: now() };
+  if (!existing) fields.createdAt = now();
+  run(setDoc(doc(db, 'orderlist', id), fields, { merge: true }));
+  data.orderlist.set(id, {
+    ...existing, id, materialId, status: 'offen', qty: (existing?.qty || 0) + 1,
+    createdAt: existing?.createdAt || now(), updatedAt: now(),
+  });
+  emit();
+  return data.orderlist.get(id).qty;
+}
+
+/** Menge eines Eintrags ändern; bei 0 wird er entfernt. */
+export function changeQty(entryId, delta) {
+  const e = data.orderlist.get(entryId);
+  if (!e) return;
+  const qty = (e.qty || 0) + delta;
+  if (qty <= 0) { removeEntry(entryId); return; }
+  run(updateDoc(doc(db, 'orderlist', entryId), { qty: increment(delta), updatedAt: now() }));
+  e.qty = qty;
+  emit();
+}
+
+export const changeOpenQty = (materialId, delta) => changeQty(openId(materialId), delta);
+
+export function removeEntry(entryId) {
+  run(deleteDoc(doc(db, 'orderlist', entryId)));
+  data.orderlist.delete(entryId);
+  emit();
+}
+
+/** Offene Einträge als „bestellt“ markieren (werden zu eigenen Einträgen mit Bestelldatum). */
+export function markOrdered(entryIds) {
+  const batch = writeBatch(db);
+  for (const id of entryIds) {
+    const e = data.orderlist.get(id);
+    if (!e || e.status !== 'offen') continue;
+    const next = { id: newId('orderlist'), materialId: e.materialId, qty: e.qty, status: 'bestellt',
+      createdAt: e.createdAt || now(), orderedAt: now(), updatedAt: now() };
+    batch.set(doc(db, 'orderlist', next.id), withoutId(next));
+    batch.delete(doc(db, 'orderlist', id));
+    data.orderlist.delete(id);
+    data.orderlist.set(next.id, next);
+  }
+  run(batch.commit());
+  emit();
+}
+
+/** Bestellten Eintrag zurück auf „offen“ (Menge wird zu einem evtl. offenen Eintrag addiert). */
+export function reopenEntry(entryId) {
+  const e = data.orderlist.get(entryId);
+  if (!e) return;
+  const id = openId(e.materialId);
+  const existing = data.orderlist.get(id);
+  const batch = writeBatch(db);
+  batch.set(doc(db, 'orderlist', id), {
+    materialId: e.materialId, status: 'offen', qty: increment(e.qty || 1),
+    createdAt: existing?.createdAt || e.createdAt || now(), updatedAt: now(),
+  }, { merge: true });
+  batch.delete(doc(db, 'orderlist', entryId));
+  run(batch.commit());
+  data.orderlist.delete(entryId);
+  data.orderlist.set(id, { ...existing, id, materialId: e.materialId, status: 'offen',
+    qty: (existing?.qty || 0) + (e.qty || 1), createdAt: existing?.createdAt || e.createdAt, updatedAt: now() });
+  emit();
+}
+
+// ---------- Export ----------
 
 export function exportJSON() {
-  return JSON.stringify({ app: 'bowert-konfektionierung', exportedAt: now(), ...data }, null, 2);
+  return JSON.stringify({
+    app: 'bowert-konfektionierung', version: 2, exportedAt: now(),
+    orders: orders(), articles: articles(), materials: materials(), orderlist: orderlist(),
+  }, null, 2);
 }
 
-export function markBackup() {
-  data.meta.lastBackup = now();
-  persist();
-}
-
-/** Prüft eine Backup-Datei und liefert die bereinigten Daten (ohne sie zu übernehmen). */
-export function parseBackup(text) {
-  let raw;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    throw new Error('Die Datei ist kein gültiges Backup.');
-  }
-  if (!raw || !Array.isArray(raw.orders) || !Array.isArray(raw.articles) || !Array.isArray(raw.materials)) {
-    throw new Error('Die Datei ist kein Backup dieser App.');
-  }
-  if (Number(raw.version) > DATA_VERSION) {
-    throw new Error('Das Backup stammt aus einer neueren App-Version. Bitte App neu laden.');
-  }
-  const clean = sanitize(raw);
-  clean.meta.lastBackup = raw.exportedAt ?? clean.meta.lastBackup;
-  return clean;
-}
-
-/** Ersetzt alle Daten (Import). Der vorherige Stand wird zur Sicherheit aufgehoben. */
-export function replaceAll(next) {
-  try { localStorage.setItem(BEFORE_IMPORT_KEY, JSON.stringify(data)); } catch { /* ignorieren */ }
-  data = next;
-  persist();
+function withoutId(obj) {
+  const { id, ...rest } = obj;
+  return rest;
 }

@@ -18,6 +18,8 @@
   <script type="module" src="js/app.js"></script>
 </head>
 <body>
+  <div id="splash" class="login"><div class="login-logo" aria-label="Lädt">BW</div></div>
+
   <section id="login" class="login" hidden>
     <form id="login-form" class="login-card" novalidate>
       <div class="login-logo" aria-hidden="true">BW</div>
@@ -36,6 +38,7 @@
       <button id="back" class="icon-btn" type="button" aria-label="Zurück" hidden></button>
       <span id="brand" class="brand-mark" aria-hidden="true">BW</span>
       <h1 id="title">Konfektionierung</h1>
+      <span id="sync" class="sync" role="status" hidden></span>
       <div id="topbar-action" class="topbar-action"></div>
     </header>
 
@@ -46,7 +49,7 @@
       <a class="tab" href="#/auftraege" data-tab="auftraege" data-icon="orders"><span>Aufträge</span></a>
       <a class="tab" href="#/artikel" data-tab="artikel" data-icon="article"><span>Artikel</span></a>
       <a class="tab" href="#/material" data-tab="material" data-icon="material"><span>Material</span></a>
-      <a class="tab" href="#/mehr" data-tab="mehr" data-icon="more"><span>Mehr</span></a>
+      <a class="tab" href="#/bestellliste" data-tab="bestellliste" data-icon="cart"><span>Bestellliste</span><b id="orderlist-badge" class="tab-badge" hidden></b></a>
     </nav>
   </div>
 
