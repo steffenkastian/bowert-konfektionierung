@@ -5,8 +5,9 @@ import * as store from './store.js';
 import {
   $, $$, esc, norm, natCmp, locCmp, matcher, plural, formatDate, toast, icon, attachSuggest,
 } from './ui.js';
+import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 const PREFS_KEY = 'konf.ui';
 const LIST_LIMIT = 40;
 const CODE_ATTRS = 'autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false"';
@@ -143,6 +144,7 @@ const routes = [
   [route(`artikel/neu${Q}`), (q) => viewArticleEdit(null, q)],
   [route(`artikel/${ID}/bearbeiten`), (id) => viewArticleEdit(id)],
   [route(`artikel/${ID}/material/neu`), (id) => viewAddMaterial(id)],
+  [route(`artikel/${ID}/datei/${ID}`), (id, fid) => viewFile(id, fid)],
   [route(`artikel/${ID}`), (id) => viewArticle(id)],
   [route(`material${Q}`), (q) => viewMaterials(q)],
   [route('material/neu'), () => viewMaterial(null)],
@@ -296,9 +298,26 @@ function materialList(a, opts = {}) {
   return `<ul class="mats">${mats.map((m) => materialRow(m, { articleId: a.id, ...opts })).join('')}</ul>`;
 }
 
+/** Packhinweise (Fotos/PDFs) als Kachelreihe; mit `add` zusätzlich eine „Hinzufügen“-Kachel. */
+function fileStrip(a, { add = false } = {}) {
+  const files = store.articleFiles(a);
+  if (!files.length && !add) return '';
+  const tiles = files.map((f) => `<li><a class="file-tile" href="#/artikel/${a.id}/datei/${f.id}">
+      <span class="file-thumb${f.thumb ? '' : ' is-doc'}">${f.thumb ? `<img src="${esc(f.thumb)}" alt="" loading="lazy">` : icon.pdf}</span>
+      <span class="file-name">${esc(f.name)}</span></a></li>`).join('');
+  const addTile = add ? `<li><button type="button" class="file-tile file-add" data-upload="${a.id}">
+      <span class="file-thumb">${icon.camera}</span><span class="file-name">Foto / PDF</span></button></li>` : '';
+  return `<ul class="files" aria-label="Packhinweise">${tiles}${addTile}</ul>`;
+}
+
+/** Kompakte Packhinweis-Reihe für Auftrags-/Artikelkarten (nur wenn vorhanden). */
+const filesBlock = (a) => (store.articleFiles(a).length
+  ? `<div class="files-block"><span class="files-label">${icon.clip}Packhinweise</span>${fileStrip(a)}</div>` : '');
+
 function articleBlock(a, opts) {
   return `<section class="art">
     <a class="art-head" href="#/artikel/${a.id}"><span class="eyebrow">Artikel</span><span class="art-name">${esc(a.name)}</span></a>
+    ${filesBlock(a)}
     ${materialList(a, opts)}
   </section>`;
 }
@@ -326,7 +345,7 @@ function articleCard(a, { primary = false } = {}) {
       <span class="card-head-main"><span class="eyebrow">Artikel</span><span class="card-title">${esc(a.name)}</span></span>
       ${icon.chevron}
     </a>
-    <div class="art">${materialList(a)}</div>
+    <div class="art">${filesBlock(a)}${materialList(a)}</div>
     ${ords.length ? `<p class="card-foot">Aufträge: ${shown}${ords.length > 6 ? ` +${ords.length - 6}` : ''}</p>` : ''}
   </article>`;
 }
@@ -345,10 +364,12 @@ function orderRow(o) {
 function articleRow(a) {
   const nMat = (a.materialIds || []).length;
   const nOrd = store.ordersWithArticle(a.id).length;
+  const nFiles = store.articleFiles(a).length;
   return row({
     href: `#/artikel/${a.id}`,
     title: esc(a.name),
-    sub: esc(`${plural(nMat, 'Material', 'Materialien')} · ${plural(nOrd, 'Auftrag', 'Aufträge')}`),
+    sub: esc([plural(nMat, 'Material', 'Materialien'), plural(nOrd, 'Auftrag', 'Aufträge'),
+      nFiles ? plural(nFiles, 'Packhinweis', 'Packhinweise') : ''].filter(Boolean).join(' · ')),
     tag: nMat ? '' : '<span class="tag">kein Material</span>',
   });
 }
@@ -776,6 +797,7 @@ function viewArticle(id) {
   if (!a) return notFound('Artikel');
   const ords = store.ordersWithArticle(a.id);
   const nMat = (a.materialIds || []).length;
+  const nFiles = store.articleFiles(a).length;
   return {
     title: 'Artikel',
     back: '#/artikel',
@@ -789,6 +811,9 @@ function viewArticle(id) {
       ${sectionTitle('Materialien', nMat)}
       ${nMat ? `<div class="card art">${materialList(a)}</div>` : ''}
       <a class="btn btn-primary btn-block" href="#/artikel/${a.id}/material/neu">${icon.plus}<span>Material hinzufügen</span></a>
+      ${sectionTitle('Packhinweise', nFiles)}
+      <div class="card files-card">${fileStrip(a, { add: true })}
+        ${nFiles ? '' : '<p class="hint">Foto oder PDF mit Packschema, Lagenbild o. Ä. – erscheint dann bei jedem Auftrag mit diesem Artikel.</p>'}</div>
       ${sectionTitle('Aufträge mit diesem Artikel', ords.length)}
       ${ords.length ? `<ul class="card list">${ords.map(orderRow).join('')}</ul>`
         : '<p class="hint">Noch keinem Auftrag zugeordnet.</p>'}`,
@@ -960,6 +985,154 @@ function viewAddMaterial(articleId) {
 // ======================================================================
 // Material
 // ======================================================================
+
+// ======================================================================
+// Packhinweise
+// ======================================================================
+
+function viewFile(articleId, fileId) {
+  const a = store.getArticle(articleId);
+  const f = store.getArticleFile(a, fileId);
+  if (!f) return notFound('Packhinweis');
+  const pdf = isPdf(f);
+  const view = {
+    title: 'Packhinweis',
+    back: `#/artikel/${a.id}`,
+    tab: 'artikel',
+    action: `<button type="button" class="icon-btn" id="rename" aria-label="Umbenennen" title="Umbenennen">${icon.edit}</button>`,
+    html: `
+      <div class="detail-head">
+        <span class="eyebrow">Packhinweis · <a href="#/artikel/${a.id}">${esc(a.name)}</a></span>
+        <div class="detail-title" id="file-title">${esc(f.name)}</div>
+        <div class="detail-sub">${pdf ? 'PDF' : 'Foto'} · ${fileSize(f.size)} · ${formatDate(f.createdAt)}</div>
+      </div>
+      <div class="file-view${pdf ? ' is-pdf' : ''}" id="file-box"><div class="loading"><span class="spinner"></span>Wird geladen …</div></div>
+      <p class="hint center" id="zoom-hint" hidden>Mit zwei Fingern vergrößern.</p>
+      <button type="button" class="btn btn-secondary btn-block" id="share" hidden>${icon.share}<span>${pdf ? 'In anderer App öffnen / teilen' : 'Teilen / speichern'}</span></button>
+      ${deleteButton('Packhinweis löschen')}`,
+    mount(root) {
+      let url = '';
+      let file = null;
+      let cleanup = null;
+      let deleting = false;
+      const alive = () => currentView === view;
+      const box = $('#file-box', root);
+      const cur = () => store.getArticleFile(store.getArticle(a.id), f.id) || f;
+
+      store.loadFile(f).then(async (blob) => {
+        if (!alive()) return;
+        const ext = pdf ? 'pdf' : (blob.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
+        file = new File([blob], `${cur().name.replace(/[\\/:*?"<>|]+/g, '-')}.${ext}`, { type: blob.type });
+        url = URL.createObjectURL(blob);
+        $('#share', root).hidden = false;
+        if (!pdf) {
+          box.innerHTML = `<img class="file-img" src="${url}" alt="${esc(f.name)}">`;
+          $('#zoom-hint', root).hidden = false;
+          return;
+        }
+        box.innerHTML = '';
+        try {
+          cleanup = await renderPdf(blob, box, alive);
+          if (alive()) $('#zoom-hint', root).hidden = false;
+        } catch (ex) {
+          console.error(ex);
+          box.innerHTML = '<p class="empty-inline pad">PDF kann hier nicht angezeigt werden – über den Knopf unten in einer anderen App öffnen.</p>';
+        }
+      }).catch((ex) => {
+        console.error(ex);
+        if (alive()) box.innerHTML = `<p class="empty-inline pad">${esc(ex.message)}</p>`;
+      });
+
+      // Beim Verlassen der Ansicht Speicher freigeben
+      const leave = () => {
+        if (alive()) return;
+        window.removeEventListener('hashchange', leave);
+        if (url) setTimeout(() => URL.revokeObjectURL(url), 1000);
+        cleanup?.();
+      };
+      window.addEventListener('hashchange', leave);
+
+      $('#share', root).addEventListener('click', async () => {
+        if (!file) return;
+        try {
+          if (matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
+            await navigator.share({ files: [file], title: file.name });
+          } else {
+            const link = Object.assign(document.createElement('a'), { href: url, download: file.name });
+            document.body.append(link);
+            link.click();
+            link.remove();
+          }
+        } catch (ex) {
+          if (ex.name !== 'AbortError') toast(`Teilen nicht möglich: ${ex.message}`, 'error');
+        }
+      });
+      $('#rename').addEventListener('click', () => {
+        const name = prompt('Name des Packhinweises:', cur().name);
+        if (name == null || !name.trim()) return;
+        store.renameArticleFile(a.id, f.id, name);
+        toast('Umbenannt');
+      });
+      $('#del', root).addEventListener('click', () => {
+        if (!confirm(`Packhinweis „${cur().name}“ löschen?`)) return;
+        deleting = true;
+        store.removeArticleFile(a.id, f.id);
+        toast('Packhinweis gelöscht');
+        back(`#/artikel/${a.id}`);
+      });
+
+      // Datenänderungen (auch von anderen Handys): Datei nicht neu laden, nur den Namen nachziehen.
+      return () => {
+        if (deleting || !alive()) return;
+        if (!store.getArticleFile(store.getArticle(a.id), f.id)) {
+          toast('Packhinweis wurde gelöscht');
+          replace(`#/artikel/${a.id}`);
+          return;
+        }
+        $('#file-title', root).textContent = cur().name;
+      };
+    },
+  };
+  return view;
+}
+
+/**
+ * Datei-Auswahl für Packhinweise: ein festes, unsichtbares Eingabefeld außerhalb der Ansichten,
+ * damit die Auswahl nicht verloren geht, falls die Ansicht währenddessen neu gezeichnet wird.
+ */
+const uploadInput = Object.assign(document.createElement('input'), {
+  type: 'file', accept: ACCEPT, multiple: true, hidden: true, id: 'upload',
+});
+document.body.append(uploadInput);
+let uploadTarget = null;
+
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-upload]');
+  if (!b) return;
+  uploadTarget = b.dataset.upload;
+  uploadInput.click();
+});
+
+uploadInput.addEventListener('change', async () => {
+  const chosen = [...uploadInput.files];
+  uploadInput.value = '';
+  const articleId = uploadTarget;
+  if (!chosen.length || !store.getArticle(articleId)) return;
+  toast(chosen.length > 1 ? `${chosen.length} Dateien werden vorbereitet …` : 'Wird vorbereitet …');
+  let ok = 0;
+  const errors = [];
+  for (const file of chosen) {
+    try {
+      await store.addArticleFile(articleId, await prepareUpload(file));
+      ok += 1;
+    } catch (ex) {
+      console.error(ex);
+      errors.push(ex.message);
+    }
+  }
+  if (errors.length) toast(errors.join(' '), 'error');
+  else toast(`${plural(ok, 'Packhinweis', 'Packhinweise')} gespeichert${navigator.onLine ? '' : ' – wird hochgeladen, sobald Empfang da ist'}`);
+});
 
 function viewMaterials(query) {
   const onlyOpen = new URLSearchParams(query || '').get('offen') === '1';

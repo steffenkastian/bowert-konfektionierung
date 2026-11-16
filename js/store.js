@@ -3,7 +3,11 @@
 // Struktur:
 //   orders/{id}     { nr, articleId, note, status }       Auftragsnummer → eine Artikelbezeichnung
 //                   status: „neu“ (nicht begonnen) | „arbeit“ (in Arbeit) | „fertig“ (abgeschlossen)
-//   articles/{id}   { name, materialIds: [] }             Artikelbezeichnung (z. B. „5er“) → Materialien
+//   articles/{id}   { name, materialIds: [], files: [] }  Artikelbezeichnung (z. B. „5er“) → Materialien
+//                   files: Packhinweise (Foto/PDF) als { id, name, type, size, parts, thumb, createdAt }
+//   files/{fileId}-{n}  { articleId, fileId, part, parts, data: Bytes }
+//                   Dateiinhalt in Stücken < 1 MB (Firestore-Grenze je Dokument). Wird nicht live
+//                   abgeglichen, sondern erst beim Öffnen geladen (danach im Offline-Cache).
 //   materials/{id}  { nr, description, location }         Artikelnummer + optionale Beschreibung/Lagerort
 //   orderlist/{id}  { materialId, qty, status }           Bestellliste: status „offen“ | „bestellt“
 //                   offene Einträge haben die feste ID „offen-<materialId>“, damit mehrere Handys
@@ -16,7 +20,7 @@ import {
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
   collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, writeBatch,
-  increment, arrayUnion, arrayRemove,
+  increment, arrayUnion, arrayRemove, getDoc, getDocFromCache, Bytes,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 import { firebaseConfig, TEAM_EMAIL } from './config.js';
 import { norm, natCmp } from './ui.js';
@@ -180,6 +184,7 @@ export function saveArticle({ id, name }) {
 export function deleteArticle(id) {
   const batch = writeBatch(db);
   batch.delete(doc(db, 'articles', id));
+  for (const f of articleFiles(getArticle(id))) deleteFileParts(batch, f);
   for (const o of ordersWithArticle(id)) {
     batch.update(doc(db, 'orders', o.id), { articleId: '', updatedAt: now() });
     o.articleId = '';
@@ -223,6 +228,95 @@ export function removeMaterialFromArticle(articleId, materialId) {
   run(updateDoc(doc(db, 'articles', articleId), { materialIds: arrayRemove(materialId), updatedAt: now() }));
   a.materialIds = (a.materialIds || []).filter((x) => x !== materialId);
   emit();
+}
+
+// ---------- Packhinweise (Fotos / PDFs je Artikel) ----------
+
+const FILE_PART = 900_000; // Bytes je Dokument (Firestore erlaubt knapp 1 MiB)
+const partId = (fileId, i) => `${fileId}-${i}`;
+const fileCache = new Map(); // fileId → Blob (zuletzt geöffnete Dateien im Speicher)
+
+export const articleFiles = (a) => a?.files || [];
+export const getArticleFile = (a, fileId) => articleFiles(a).find((f) => f.id === fileId);
+
+function cacheFile(id, blob) {
+  fileCache.delete(id);
+  fileCache.set(id, blob);
+  while (fileCache.size > 12) fileCache.delete(fileCache.keys().next().value);
+}
+
+function deleteFileParts(batch, f) {
+  for (let i = 0; i < (f.parts || 1); i++) batch.delete(doc(db, 'files', partId(f.id, i)));
+}
+
+/**
+ * Hängt eine Datei an einen Artikel. Erst die Datenstücke, dann der Eintrag am Artikel –
+ * Firestore überträgt Schreibvorgänge in dieser Reihenfolge, andere Handys sehen die Datei
+ * also erst, wenn ihr Inhalt vollständig da ist. Offline wird später hochgeladen.
+ */
+export async function addArticleFile(articleId, { blob, name, type, thumb = '' }) {
+  const a = getArticle(articleId);
+  if (!a) throw new Error('Artikel nicht gefunden.');
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const id = newId('files');
+  const parts = Math.max(1, Math.ceil(bytes.length / FILE_PART));
+  for (let i = 0; i < parts; i++) {
+    const data = Bytes.fromUint8Array(bytes.subarray(i * FILE_PART, (i + 1) * FILE_PART));
+    run(setDoc(doc(db, 'files', partId(id, i)), { articleId, fileId: id, part: i, parts, data, createdAt: now() }));
+  }
+  const meta = { id, name: str(name) || 'Packhinweis', type, size: bytes.length, parts, thumb, createdAt: now() };
+  run(updateDoc(doc(db, 'articles', articleId), { files: arrayUnion(meta), updatedAt: now() }));
+  a.files = [...articleFiles(a), meta];
+  cacheFile(id, blob);
+  emit();
+  return meta;
+}
+
+export function renameArticleFile(articleId, fileId, name) {
+  const a = getArticle(articleId);
+  name = str(name);
+  if (!a || !name) return;
+  const files = articleFiles(a).map((f) => (f.id === fileId ? { ...f, name } : f));
+  run(updateDoc(doc(db, 'articles', articleId), { files, updatedAt: now() }));
+  a.files = files;
+  emit();
+}
+
+export function removeArticleFile(articleId, fileId) {
+  const a = getArticle(articleId);
+  const f = getArticleFile(a, fileId);
+  if (!f) return;
+  const batch = writeBatch(db);
+  batch.update(doc(db, 'articles', articleId), { files: arrayRemove(f), updatedAt: now() });
+  deleteFileParts(batch, f);
+  run(batch.commit());
+  a.files = articleFiles(a).filter((x) => x.id !== fileId);
+  fileCache.delete(fileId);
+  emit();
+}
+
+/** Lädt den Inhalt einer Datei (Speicher → Offline-Cache → Server). */
+export async function loadFile(f) {
+  if (fileCache.has(f.id)) return fileCache.get(f.id);
+  const chunks = await Promise.all(Array.from({ length: f.parts || 1 }, async (_, i) => {
+    const ref = doc(db, 'files', partId(f.id, i));
+    let snap = await getDocFromCache(ref).catch(() => null);
+    if (!snap?.exists()) {
+      try {
+        snap = await getDoc(ref);
+      } catch (ex) {
+        if (ex.code === 'unavailable' || !navigator.onLine) {
+          throw new Error('Ohne Empfang nicht verfügbar – die Datei wurde auf diesem Handy noch nie geöffnet.');
+        }
+        throw ex;
+      }
+    }
+    if (!snap.exists()) throw new Error('Datei nicht gefunden – evtl. wird sie gerade noch hochgeladen.');
+    return snap.data().data.toUint8Array();
+  }));
+  const blob = new Blob(chunks, { type: f.type });
+  cacheFile(f.id, blob);
+  return blob;
 }
 
 // ---------- Material ----------

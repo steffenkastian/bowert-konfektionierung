@@ -1,7 +1,7 @@
 // Service Worker: hält die App-Dateien offline verfügbar (Lager mit schlechtem Empfang).
 // Die Daten selbst cacht Firebase (Firestore-Offline-Cache) – Anfragen an Firebase laufen hier nicht durch.
 // Bei jeder neuen Version CACHE hochzählen, damit installierte Apps die neuen Dateien laden.
-const CACHE = 'konf-v3';
+const CACHE = 'konf-v4';
 const FIREBASE = 'https://www.gstatic.com/firebasejs/10.12.2/';
 const ASSETS = [
   './',
@@ -11,6 +11,7 @@ const ASSETS = [
   './js/store.js',
   './js/ui.js',
   './js/config.js',
+  './js/files.js',
   './manifest.webmanifest',
   './icons/icon.svg',
   './icons/icon-192.png',
@@ -43,13 +44,15 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET') return;
   const sameOrigin = new URL(request.url).origin === self.location.origin;
   const firebaseLib = request.url.startsWith(FIREBASE);
+  // PDF-Anzeige (pdf.js) wird erst beim ersten PDF geladen und dann aufbewahrt.
+  const vendor = sameOrigin && new URL(request.url).pathname.includes('/vendor/');
   if (!sameOrigin && !firebaseLib) return;
 
   event.respondWith(
     caches.open(CACHE).then(async (cache) => {
       const cached = await cache.match(request, { ignoreSearch: sameOrigin });
-      // Firebase-Bibliotheken sind versioniert und ändern sich nie → Cache genügt.
-      if (cached && firebaseLib) return cached;
+      // Firebase-Bibliotheken und pdf.js sind versioniert und ändern sich nie → Cache genügt.
+      if (cached && (firebaseLib || vendor)) return cached;
       // Eigene Dateien: sofort aus dem Cache, im Hintergrund aktualisieren.
       const fresh = fetch(request)
         .then((response) => {

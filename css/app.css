@@ -225,6 +225,58 @@ a.mat-body:active { background: var(--press); }
   text-align: center; overflow-wrap: anywhere;
   box-shadow: inset 0 0 0 1px rgb(0 0 0 / 14%);
 }
+/* ---------- Packhinweise (Fotos / PDFs) ---------- */
+
+.files {
+  list-style: none; margin: 0; padding: 2px 0 4px;
+  display: flex; gap: 10px; overflow-x: auto; scrollbar-width: none;
+  -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain;
+}
+.files::-webkit-scrollbar { display: none; }
+.files > li { flex: none; }
+.file-tile {
+  display: flex; flex-direction: column; gap: 5px; width: 92px;
+  padding: 0; border: 0; background: none; font: inherit; color: inherit;
+  text-decoration: none; text-align: left; cursor: pointer;
+}
+.file-thumb {
+  display: grid; place-items: center; width: 92px; height: 92px; overflow: hidden;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); color: var(--muted);
+}
+.file-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.file-thumb svg { width: 34px; height: 34px; }
+.file-thumb.is-doc { color: var(--danger); }
+.file-tile:active .file-thumb { filter: brightness(0.92); }
+.file-name {
+  font-size: 13px; line-height: 1.25; color: var(--ink);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.file-add .file-thumb { border: 1.5px dashed var(--line-strong); background: transparent; color: var(--accent-text); }
+.file-add .file-name { color: var(--accent-text); font-weight: 650; }
+.files-card { padding: 12px 14px 10px; }
+.files-card .files { flex-wrap: wrap; overflow: visible; row-gap: 12px; }
+.files-card > .hint { margin: 8px 2px 2px; }
+.files-block { padding: 8px 0 6px; border-bottom: 1px dashed var(--line); }
+.files-label {
+  display: flex; align-items: center; gap: 5px; margin-bottom: 6px;
+  font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted);
+}
+.files-label svg { width: 15px; height: 15px; }
+.files-block .file-tile, .files-block .file-thumb { width: 76px; }
+.files-block .file-thumb { height: 76px; }
+.files-block .file-name { font-size: 12.5px; }
+
+.file-view {
+  margin-bottom: 4px; overflow: hidden;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface);
+}
+.file-view.is-pdf { background: #8a8790; display: flex; flex-direction: column; gap: 8px; padding: 8px; }
+.file-view.is-pdf .loading, .file-view.is-pdf .empty-inline { color: #fff; }
+.file-img { display: block; width: 100%; height: auto; }
+.pdf-page { display: block; width: 100%; height: auto; background: #fff; box-shadow: 0 1px 4px rgb(0 0 0 / 25%); }
+#zoom-hint { margin: 8px 8px 14px; }
+
 @media (max-width: 380px) {
   .mat { gap: 8px; }
   .mats.pad { padding: 0 8px 0 12px; }

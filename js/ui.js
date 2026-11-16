@@ -95,6 +95,9 @@ export const icon = {
   check: svg('<path d="m5 12.5 4.5 4.5L19 7.5"/>'),
   minus: svg('<path d="M5 12h14"/>'),
   undo: svg('<path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>'),
+  camera: svg('<path d="M4 8h3l1.5-2.5h7L17 8h3v11H4z"/><circle cx="12" cy="13.5" r="3.5"/>'),
+  pdf: svg('<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12.5h6M9 16h6"/>'),
+  clip: svg('<path d="m20 11.5-7.8 7.8a5 5 0 0 1-7.1-7.1l8.3-8.3a3.3 3.3 0 0 1 4.7 4.7l-8.2 8.2a1.7 1.7 0 0 1-2.4-2.4l7.5-7.5"/>'),
   cloudOff: svg('<path d="m3 3 18 18M8.5 8.6A5 5 0 0 0 6.5 18H17m3.4-1.7A4 4 0 0 0 17 10h-.6A6 6 0 0 0 10 6.3"/>'),
 };
 
