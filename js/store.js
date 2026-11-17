@@ -1,8 +1,10 @@
 // Datenhaltung: Firebase Firestore (online, für alle Mitarbeiter gemeinsam, mit Offline-Cache).
 //
 // Struktur:
-//   orders/{id}     { nr, articleId, note, status }       Auftragsnummer → eine Artikelbezeichnung
-//                   status: „neu“ (nicht begonnen) | „arbeit“ (in Arbeit) | „fertig“ (abgeschlossen)
+//   orders/{id}     { nr, articleId, note, status, after } Auftragsnummer → eine Artikelbezeichnung
+//                   status: „neu“ (nicht begonnen) | „naechstes“ (als nächstes) | „arbeit“ (in Arbeit)
+//                           | „fertig“ (abgeschlossen)
+//                   after: bei „naechstes“ die ID des laufenden Auftrags, nach dem er drankommt („“ = keiner)
 //   articles/{id}   { name, materialIds: [], files: [] }  Artikelbezeichnung (z. B. „5er“) → Materialien
 //                   files: Packhinweise (Foto/PDF) als { id, name, type, size, parts, thumb, createdAt }
 //   files/{fileId}-{n}  { articleId, fileId, part, parts, data: Bytes }
@@ -113,26 +115,35 @@ export const isEmpty = () => !data.orders.size && !data.articles.size && !data.m
 // ---------- Aufträge ----------
 
 /** Speichert einen Auftrag. Eine noch unbekannte Artikelbezeichnung wird dabei neu angelegt. */
-export const ORDER_STATUSES = ['neu', 'arbeit', 'fertig'];
+export const ORDER_STATUSES = ['neu', 'naechstes', 'arbeit', 'fertig'];
 export const orderStatus = (o) => (ORDER_STATUSES.includes(o?.status) ? o.status : 'neu');
 
 /** Zeitstempel zum Status merken (z. B. für eine spätere Tagesübersicht). */
 const statusStamps = (status) => ({
   status,
+  ...(status === 'naechstes' ? { queuedAt: now() } : {}),
   ...(status === 'arbeit' ? { startedAt: now() } : {}),
   ...(status === 'fertig' ? { doneAt: now() } : {}),
 });
 
-export function setOrderStatus(id, status) {
+/** Status setzen; bei „naechstes“ mit `after` = laufender Auftrag, nach dem er drankommt. */
+export function setOrderStatus(id, status, { after = '' } = {}) {
   const o = getOrder(id);
-  if (!o || !ORDER_STATUSES.includes(status) || orderStatus(o) === status) return;
+  if (!o || !ORDER_STATUSES.includes(status) || id === after) return;
+  if (orderStatus(o) === status && (status !== 'naechstes' || (o.after || '') === after)) return;
   const fields = { ...statusStamps(status), updatedAt: now() };
+  if (status === 'naechstes') fields.after = after;
   run(updateDoc(doc(db, 'orders', id), fields));
   Object.assign(o, fields);
   emit();
 }
 
-export function saveOrder({ id, nr, note, articleName, status = 'neu' }) {
+/** Aufträge, die nach dem (laufenden) Auftrag `id` drankommen sollen – in der Reihenfolge der Planung. */
+export const nextOrders = (id) => orders()
+  .filter((o) => o.after === id && orderStatus(o) === 'naechstes')
+  .sort((a, b) => (a.queuedAt || '').localeCompare(b.queuedAt || ''));
+
+export function saveOrder({ id, nr, note, articleName, status = 'neu', after = '' }) {
   nr = str(nr);
   articleName = str(articleName);
   if (!nr) throw new Error('Bitte eine Auftragsnummer eingeben.');
@@ -151,7 +162,10 @@ export function saveOrder({ id, nr, note, articleName, status = 'neu' }) {
   const fields = { nr, note: str(note), articleId: article.id, updatedAt: now() };
   if (!id) fields.createdAt = now();
   if (!ORDER_STATUSES.includes(status)) status = 'neu';
-  if (!id || orderStatus(getOrder(id)) !== status) Object.assign(fields, statusStamps(status));
+  const prev = id ? getOrder(id) : null;
+  const relinked = status === 'naechstes' && (prev?.after || '') !== after;
+  if (!prev || orderStatus(prev) !== status || relinked) Object.assign(fields, statusStamps(status));
+  if (status === 'naechstes') fields.after = after === orderId ? '' : after;
   batch.set(doc(db, 'orders', orderId), fields, { merge: true });
   data.orders.set(orderId, { ...data.orders.get(orderId), id: orderId, ...fields });
   run(batch.commit());
@@ -160,7 +174,14 @@ export function saveOrder({ id, nr, note, articleName, status = 'neu' }) {
 }
 
 export function deleteOrder(id) {
-  run(deleteDoc(doc(db, 'orders', id)));
+  const batch = writeBatch(db);
+  batch.delete(doc(db, 'orders', id));
+  // Wer nach diesem Auftrag drankommen sollte, bleibt „als nächstes“, nur ohne Vorgänger.
+  for (const n of nextOrders(id)) {
+    batch.update(doc(db, 'orders', n.id), { after: '', updatedAt: now() });
+    n.after = '';
+  }
+  run(batch.commit());
   data.orders.delete(id);
   emit();
 }

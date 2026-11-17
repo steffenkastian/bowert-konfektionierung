@@ -576,12 +576,14 @@ main > .btn-block { margin-top: 12px; }
 
 :root {
   --st-neu-bg: #ebe9e5; --st-neu-ink: #5b5662;
+  --st-naechstes-bg: #fbe8d0; --st-naechstes-ink: #8a4700; --st-naechstes-solid: #c26400;
   --st-arbeit-bg: #dceafc; --st-arbeit-ink: #1652a6; --st-arbeit-solid: #1c6dd0;
   --st-fertig-bg: #e1eedf; --st-fertig-ink: #2f5a33; --st-fertig-solid: #517b54;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --st-neu-bg: #2f2b35; --st-neu-ink: #bdb7c4;
+    --st-naechstes-bg: #3b2a15; --st-naechstes-ink: #f4b36a; --st-naechstes-solid: #b85f00;
     --st-arbeit-bg: #182c47; --st-arbeit-ink: #8cbcf5; --st-arbeit-solid: #2f7fdc;
     --st-fertig-bg: #1f3222; --st-fertig-ink: #9cc79f; --st-fertig-solid: #517b54;
   }
@@ -591,13 +593,54 @@ main > .btn-block { margin-top: 12px; }
   font-size: 12px; font-weight: 750; white-space: nowrap; letter-spacing: 0;
 }
 .status.st-neu { background: var(--st-neu-bg); color: var(--st-neu-ink); }
+.status.st-naechstes { background: var(--st-naechstes-bg); color: var(--st-naechstes-ink); }
 .status.st-arbeit { background: var(--st-arbeit-bg); color: var(--st-arbeit-ink); }
 .status.st-fertig { background: var(--st-fertig-bg); color: var(--st-fertig-ink); }
 .eyebrow-row { display: flex; align-items: center; gap: 8px; }
 
+/* „Als nächstes“ am laufenden Auftrag */
+.next-ref { display: block; margin-top: 1px; font-size: 13.5px; font-weight: 650; color: var(--st-naechstes-ink); }
+.next-box { border-color: var(--st-naechstes-solid); border-width: 1.5px; overflow: visible; }
+.next-head {
+  display: flex; align-items: center; gap: 6px; padding: 12px 16px 4px;
+  font-size: 12px; font-weight: 750; letter-spacing: 0.06em; text-transform: uppercase; color: var(--st-naechstes-ink);
+}
+.next-head svg { width: 17px; height: 17px; }
+.next-list { list-style: none; margin: 0; padding: 0; }
+.next-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px 8px 16px; }
+.next-item + .next-item { border-top: 1px dashed var(--line); }
+.next-main { flex: 1; min-width: 0; display: flex; flex-direction: column; color: inherit; text-decoration: none; }
+.next-nr { font-size: 21px; font-weight: 800; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.next-pos { margin-right: 6px; color: var(--st-naechstes-ink); }
+.next-sub { font-size: 14px; color: var(--muted); overflow-wrap: break-word; }
+.btn-next { flex: none; min-height: 44px; padding: 0 14px; background: var(--st-arbeit-solid); color: #fff; }
+.btn-next:active { filter: brightness(0.9); }
+.next-x { flex: none; color: var(--muted); }
+.next-add { padding: 6px 12px 12px; }
+.next-add .hint { margin: 8px 4px 0; }
+.after-info {
+  display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+  color: inherit; text-decoration: none; border-color: var(--st-naechstes-solid);
+}
+.after-info > svg { flex: none; width: 22px; height: 22px; color: var(--st-naechstes-ink); }
+.after-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.after-label { font-size: 12px; font-weight: 750; letter-spacing: 0.06em; text-transform: uppercase; color: var(--st-naechstes-ink); }
+.after-main b { font-size: 19px; overflow-wrap: anywhere; }
+.after-sub { font-size: 14px; color: var(--muted); }
+.after-pick { padding: 4px 14px 14px; }
+.after-q { margin: 10px 2px; font-weight: 650; }
+select.input { appearance: none; -webkit-appearance: none; padding-right: 36px;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: right 18px center, right 12px center; background-size: 6px 6px; background-repeat: no-repeat; }
+
 .status-seg button { font-size: 14px; line-height: 1.15; padding: 4px; }
 .status-seg button.st-neu[aria-pressed="true"] { background: var(--st-neu-ink); color: #fff; }
+.status-seg button.st-naechstes[aria-pressed="true"] { background: var(--st-naechstes-solid); color: #fff; }
 .status-seg button.st-arbeit[aria-pressed="true"] { background: var(--st-arbeit-solid); color: #fff; }
+/* Vier Stufen: am Handy 2 × 2 (Nicht begonnen · Als nächstes / In Arbeit · Abgeschlossen) */
+@media (max-width: 560px) {
+  .status-seg { grid-auto-flow: row; grid-template-columns: 1fr 1fr; }
+}
 .status-seg button.st-fertig[aria-pressed="true"] { background: var(--st-fertig-solid); color: #fff; }
 @media (prefers-color-scheme: dark) {
   .status-seg button.st-neu[aria-pressed="true"] { color: #1d1a22; }
@@ -615,6 +658,7 @@ main > .btn-block { margin-top: 12px; }
 .chip-btn b { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .chip-btn[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--bg); }
 .chip-btn[aria-pressed="true"] b { color: inherit; opacity: 0.75; }
+.chip-btn.st-naechstes[aria-pressed="true"] { background: var(--st-naechstes-solid); border-color: var(--st-naechstes-solid); color: #fff; }
 .chip-btn.st-arbeit[aria-pressed="true"] { background: var(--st-arbeit-solid); border-color: var(--st-arbeit-solid); color: #fff; }
 .chip-btn.st-fertig[aria-pressed="true"] { background: var(--st-fertig-solid); border-color: var(--st-fertig-solid); color: #fff; }
 

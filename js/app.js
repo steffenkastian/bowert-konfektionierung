@@ -7,7 +7,7 @@ import {
 } from './ui.js';
 import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.0';
 const PREFS_KEY = 'konf.ui';
 const LIST_LIMIT = 40;
 const CODE_ATTRS = 'autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false"';
@@ -246,8 +246,8 @@ const locBadge = (loc) =>
 const materialTitle = (m) => m.description || `Nr. ${m.nr}`;
 
 // Auftragsstatus
-const STATUS_LABEL = { neu: 'Nicht begonnen', arbeit: 'In Arbeit', fertig: 'Abgeschlossen' };
-const STATUS_RANK = { arbeit: 0, neu: 1, fertig: 2 };
+const STATUS_LABEL = { neu: 'Nicht begonnen', naechstes: 'Als nächstes', arbeit: 'In Arbeit', fertig: 'Abgeschlossen' };
+const STATUS_RANK = { arbeit: 0, naechstes: 1, neu: 2, fertig: 3 };
 const statusPill = (o) => {
   const s = store.orderStatus(o);
   return `<span class="status st-${s}">${STATUS_LABEL[s]}</span>`;
@@ -256,7 +256,22 @@ const statusSeg = (current) => `<div class="seg status-seg" role="group" aria-la
   ${store.ORDER_STATUSES.map((s) => `<button type="button" class="st-${s}" data-status="${s}" aria-pressed="${s === current}">${STATUS_LABEL[s]}</button>`).join('')}
 </div>`;
 const byStatusThenNewest = (a, b) => STATUS_RANK[store.orderStatus(a)] - STATUS_RANK[store.orderStatus(b)]
+  || (store.orderStatus(a) === 'naechstes' ? (a.queuedAt || '').localeCompare(b.queuedAt || '') : 0)
   || (b.createdAt || '').localeCompare(a.createdAt || '');
+
+/** Laufende Aufträge (optional ohne einen bestimmten). */
+const runningOrders = (exceptId = '') =>
+  store.orders().filter((o) => store.orderStatus(o) === 'arbeit' && o.id !== exceptId).sort(byStatusThenNewest);
+/** Bei „Als nächstes“: der Auftrag, nach dem dieser drankommt. */
+const predecessor = (o) => (store.orderStatus(o) === 'naechstes' && o.after ? store.getOrder(o.after) : null);
+/** Kurztext „→ danach 630-…“ bzw. „nach 630-…“ für Listen. */
+function nextRef(o) {
+  const nexts = store.orderStatus(o) === 'naechstes' ? [] : store.nextOrders(o.id);
+  if (nexts.length) return `→ danach ${nexts[0].nr}${nexts.length > 1 ? ` +${nexts.length - 1}` : ''}`;
+  const pre = predecessor(o);
+  return pre ? `nach ${pre.nr}` : '';
+}
+const orderSummary = (o) => [store.getArticle(o.articleId)?.name, o.note].filter(Boolean).join(' · ');
 
 /** Listenzeile; title/sub/tag werden bereits escaped übergeben. */
 function row({ href, title, sub = '', tag = '' }) {
@@ -330,6 +345,7 @@ function orderCard(o, { primary = false } = {}) {
         <span class="eyebrow-row"><span class="eyebrow">Auftrag</span>${statusPill(o)}</span>
         <span class="card-title">${esc(o.nr)}</span>
         ${o.note ? `<span class="card-sub">${esc(o.note)}</span>` : ''}
+        ${nextRef(o) ? `<span class="next-ref">${esc(nextRef(o))}</span>` : ''}
       </span>${icon.chevron}
     </a>
     ${a ? articleBlock(a)
@@ -353,10 +369,12 @@ function articleCard(a, { primary = false } = {}) {
 function orderRow(o) {
   const a = store.getArticle(o.articleId);
   const sub = [a?.name, o.note].filter(Boolean).join(' · ');
+  const ref = nextRef(o);
   return row({
     href: `#/auftrag/${o.id}`,
     title: esc(o.nr),
-    sub: a ? esc(sub) : `<span class="warn-text">kein Artikel</span>${o.note ? ` · ${esc(o.note)}` : ''}`,
+    sub: (a ? esc(sub) : `<span class="warn-text">kein Artikel</span>${o.note ? ` · ${esc(o.note)}` : ''}`)
+      + (ref ? `<span class="next-ref">${esc(ref)}</span>` : ''),
     tag: statusPill(o),
   });
 }
@@ -571,7 +589,9 @@ function searchHome() {
     </div>`;
   }
   const working = store.orders().filter((o) => store.orderStatus(o) === 'arbeit').sort(byStatusThenNewest);
-  const recent = prefs.recent.map(store.getOrder).filter((o) => o && store.orderStatus(o) !== 'arbeit').slice(0, 5);
+  const queued = store.orders().filter((o) => store.orderStatus(o) === 'naechstes').sort(byStatusThenNewest);
+  const recent = prefs.recent.map(store.getOrder)
+    .filter((o) => o && !['arbeit', 'naechstes'].includes(store.orderStatus(o))).slice(0, 5);
   const open = store.orderlist().filter((e) => e.status === 'offen');
   const noMaterial = store.articles().filter((a) => !(a.materialIds || []).length).length;
   const noLocation = store.materials().filter((m) => !m.location).length;
@@ -582,8 +602,9 @@ function searchHome() {
   ].filter(Boolean);
   return `
     ${working.length ? `${sectionTitle('In Arbeit', working.length)}<ul class="card list">${working.map(orderRow).join('')}</ul>` : ''}
+    ${queued.length ? `${sectionTitle('Als nächstes', queued.length)}<ul class="card list">${queued.map(orderRow).join('')}</ul>` : ''}
     ${recent.length ? `${sectionTitle('Zuletzt angesehen')}<ul class="card list">${recent.map(orderRow).join('')}</ul>` : ''}
-    ${!working.length && !recent.length ? '<p class="hint center">Auftragsnummer, Artikelbezeichnung, Artikelnummer oder Lagerort eintippen.</p>' : ''}
+    ${!working.length && !queued.length && !recent.length ? '<p class="hint center">Auftragsnummer, Artikelbezeichnung, Artikelnummer oder Lagerort eintippen.</p>' : ''}
     ${todo.length ? `${sectionTitle('Zu erledigen')}<ul class="card list">${todo.join('')}</ul>` : ''}
     <a class="btn btn-secondary btn-block" href="#/auftrag/neu">${icon.plus}<span>Neuer Auftrag</span></a>`;
 }
@@ -647,30 +668,181 @@ function viewOrder(id) {
         ${o.note ? `<div class="detail-sub">${esc(o.note)}</div>` : ''}
       </div>
       ${statusSeg(store.orderStatus(o))}
+      <div id="after-pick"></div>
+      ${afterInfo(o)}
+      ${nextBox(o)}
       ${a ? `<div class="card">${articleBlock(a)}</div>
         <a class="btn btn-secondary btn-block" href="#/artikel/${a.id}/material/neu">${icon.plus}<span>Material zu „${esc(a.name)}“ hinzufügen</span></a>`
         : emptyBox('Kein Artikel zugeordnet', 'Ordne dem Auftrag eine Artikelbezeichnung zu.',
           `<a class="btn btn-primary" href="#/auftrag/${o.id}/bearbeiten">Artikel zuordnen</a>`)}`,
     mount(root) {
+      const pick = $('#after-pick', root);
       $('.status-seg', root).addEventListener('click', (e) => {
         const b = e.target.closest('[data-status]');
         if (!b) return;
-        store.setOrderStatus(o.id, b.dataset.status);
-        toast(`Auftrag ${o.nr}: ${STATUS_LABEL[b.dataset.status]}`);
+        const status = b.dataset.status;
+        if (status === 'naechstes') { queueOrder(o, pick); return; }
+        const nexts = store.nextOrders(o.id);
+        const wasRunning = store.orderStatus(o) === 'arbeit';
+        store.setOrderStatus(o.id, status);
+        if (status === 'fertig' && wasRunning && nexts.length) {
+          const n = nexts[0];
+          toast(`${o.nr} abgeschlossen`, 'ok', { label: `${n.nr} starten`, run: () => startOrder(n) });
+        } else {
+          toast(`Auftrag ${o.nr}: ${STATUS_LABEL[status]}`);
+        }
       });
+      pick.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-after]');
+        if (!b) return;
+        setQueued(o, b.dataset.after);
+      });
+
+      $('.next-box', root)?.addEventListener('click', (e) => {
+        const start = e.target.closest('[data-start]');
+        const unlink = e.target.closest('[data-unlink]');
+        if (start) {
+          const n = store.getOrder(start.dataset.start);
+          if (!n) return;
+          const stillRunning = store.orderStatus(o) === 'arbeit';
+          startOrder(n);
+          go(`#/auftrag/${n.id}`);
+          if (stillRunning) {
+            toast(`${n.nr} gestartet`, 'ok', { label: `${o.nr} abschließen`, run: () => {
+              store.setOrderStatus(o.id, 'fertig');
+              toast(`${o.nr} abgeschlossen`);
+            } });
+          }
+        }
+        if (unlink) {
+          const n = store.getOrder(unlink.dataset.unlink);
+          if (!n) return;
+          store.setOrderStatus(n.id, 'neu');
+          toast(`${n.nr}: wieder „Nicht begonnen“`, 'ok', { label: 'Rückgängig', run: () => setQueued(n, o.id, false) });
+        }
+      });
+
+      const input = $('#next-in', root);
+      if (input) {
+        const hint = $('#next-hint', root);
+        const candidates = () => store.orders().filter((x) => x.id !== o.id
+          && ['neu', 'naechstes'].includes(store.orderStatus(x)) && !(store.orderStatus(x) === 'naechstes' && x.after === o.id));
+        const choose = (x) => { input.value = ''; hint.hidden = true; input.blur(); setQueued(x, o.id); };
+        const newHref = () => `#/auftrag/neu?nr=${encodeURIComponent(input.value.trim())}&nach=${o.id}`;
+        attachSuggest(input, {
+          source: (q) => {
+            const m = matcher(q);
+            return rank(candidates(), (x) => (q.trim() ? m(x.nr) || m(x.note) || m(store.getArticle(x.articleId)?.name) : 1), byStatusThenNewest)
+              .map(({ x }) => ({ label: x.nr, sub: [orderSummary(x), STATUS_LABEL[store.orderStatus(x)]].filter(Boolean).join(' · '), order: x }));
+          },
+          onPick: (it) => choose(it.order),
+          max: 8,
+        });
+        input.addEventListener('input', () => {
+          const q = input.value.trim();
+          hint.hidden = !q || Boolean(store.findOrderByNr(q));
+          hint.innerHTML = `Auftrag „${esc(q)}“ gibt es noch nicht. <a href="${esc(newHref())}">Neu anlegen</a>`;
+        });
+        input.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter') return;
+          e.preventDefault();
+          const q = input.value.trim();
+          if (!q) return;
+          const x = store.findOrderByNr(q);
+          if (x && x.id !== o.id) choose(x);
+          else if (!x) go(newHref());
+        });
+      }
+
+      // Daten von anderen Handys: neu zeichnen, außer man tippt gerade einen Auftrag ein.
+      return () => {
+        if (input && document.activeElement === input) return;
+        const y = window.scrollY;
+        render();
+        window.scrollTo(0, y);
+      };
     },
   };
+}
+
+/** Hinweis am Auftrag „Als nächstes“: nach welchem Auftrag er drankommt. */
+function afterInfo(o) {
+  if (store.orderStatus(o) !== 'naechstes') return '';
+  const pre = predecessor(o);
+  if (!pre) return '<p class="context">Kommt als nächstes dran (ohne festen Vorgänger).</p>';
+  const queue = store.nextOrders(pre.id);
+  const pos = queue.findIndex((x) => x.id === o.id);
+  return `<a class="card after-info" href="#/auftrag/${pre.id}">
+    ${icon.next}<span class="after-main"><span class="after-label">${pos > 0 ? `${pos + 1}. nach` : 'Kommt nach'}</span>
+    <b>${esc(pre.nr)}</b>${orderSummary(pre) ? `<span class="after-sub">${esc(orderSummary(pre))}</span>` : ''}</span>
+    ${statusPill(pre)}</a>`;
+}
+
+/** Am laufenden Auftrag: welcher Auftrag danach kommt (+ festlegen). */
+function nextBox(o) {
+  const running = store.orderStatus(o) === 'arbeit';
+  const nexts = store.orderStatus(o) === 'naechstes' ? [] : store.nextOrders(o.id);
+  if (!running && !nexts.length) return '';
+  const items = nexts.map((n, i) => `<li class="next-item">
+      <a class="next-main" href="#/auftrag/${n.id}">
+        <span class="next-nr">${nexts.length > 1 ? `<span class="next-pos">${i + 1}.</span>` : ''}${esc(n.nr)}</span>
+        ${orderSummary(n) ? `<span class="next-sub">${esc(orderSummary(n))}</span>` : ''}
+      </a>
+      <button type="button" class="btn btn-next" data-start="${n.id}">Starten</button>
+      <button type="button" class="icon-btn next-x" data-unlink="${n.id}" aria-label="${esc(n.nr)} nicht mehr als nächstes" title="Entfernen">${icon.close}</button>
+    </li>`).join('');
+  return `<section class="card next-box">
+    <div class="next-head">${icon.next}<span>Als nächstes</span></div>
+    ${items ? `<ul class="next-list">${items}</ul>` : ''}
+    ${running ? `<div class="next-add"><div class="suggest-wrap"><input id="next-in" class="input" placeholder="${nexts.length ? 'Weiteren Auftrag danach …' : 'Nächsten Auftrag wählen …'}" aria-label="Nächsten Auftrag wählen" ${CODE_ATTRS} enterkeyhint="done"></div>
+      <p class="hint" id="next-hint" hidden></p></div>` : ''}
+  </section>`;
+}
+
+function setQueued(o, after, notify = true) {
+  store.setOrderStatus(o.id, 'naechstes', { after });
+  if (!notify) return;
+  const pre = after ? store.getOrder(after) : null;
+  toast(pre ? `${o.nr} kommt nach ${pre.nr}` : `${o.nr}: Als nächstes`);
+}
+
+function startOrder(n) {
+  store.setOrderStatus(n.id, 'arbeit');
+  toast(`Auftrag ${n.nr}: In Arbeit`);
+}
+
+/** „Als nächstes“ gewählt: an den laufenden Auftrag koppeln (bei mehreren nachfragen). */
+function queueOrder(o, pick) {
+  const running = runningOrders(o.id);
+  if (running.length === 1) { setQueued(o, running[0].id); return; }
+  if (!running.length) { setQueued(o, ''); return; }
+  pick.innerHTML = `<div class="card after-pick">
+    <p class="after-q">Nach welchem laufenden Auftrag?</p>
+    ${running.map((r) => `<button type="button" class="btn btn-secondary btn-block" data-after="${r.id}">
+      <span><b>${esc(r.nr)}</b>${orderSummary(r) ? ` · ${esc(orderSummary(r))}` : ''}</span></button>`).join('')}
+    <button type="button" class="btn btn-secondary btn-block" data-after="">Keinem bestimmten</button>
+  </div>`;
+  pick.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 function viewOrderEdit(id, query) {
   const o = id ? store.getOrder(id) : null;
   if (id && !o) return notFound('Auftrag');
-  const presetNr = new URLSearchParams(query || '').get('nr') || '';
+  const params = new URLSearchParams(query || '');
+  const presetNr = params.get('nr') || '';
+  const presetAfter = store.getOrder(params.get('nach') || '')?.id || '';
   const currentArticle = o ? store.getArticle(o.articleId) : null;
+  const initialStatus = presetAfter ? 'naechstes' : store.orderStatus(o);
+  // „Kommt nach“: laufende Aufträge + ein evtl. schon gewählter (auch wenn er nicht mehr läuft)
+  const afterOptions = runningOrders(o?.id);
+  const keepAfter = presetAfter || o?.after || '';
+  if (keepAfter && !afterOptions.some((x) => x.id === keepAfter) && store.getOrder(keepAfter)) afterOptions.push(store.getOrder(keepAfter));
+  const initialAfter = presetAfter || (o && store.orderStatus(o) === 'naechstes' ? o.after || ''
+    : afterOptions.length === 1 ? afterOptions[0].id : '');
 
   return {
     title: o ? 'Auftrag bearbeiten' : 'Neuer Auftrag',
-    back: o ? `#/auftrag/${o.id}` : '#/auftraege',
+    back: o ? `#/auftrag/${o.id}` : presetAfter ? `#/auftrag/${presetAfter}` : '#/auftraege',
     tab: 'auftraege',
     form: true,
     html: `
@@ -679,7 +851,14 @@ function viewOrderEdit(id, query) {
         ${field({ id: 'art', label: 'Artikelbezeichnung', value: currentArticle?.name, placeholder: 'suchen, z. B. 5er oder 200er', attrs: 'autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="next"', suggest: true })}
         <div id="art-preview"></div>
         ${field({ id: 'note', label: 'Notiz', optional: true, value: o?.note, placeholder: 'z. B. Kunde, Menge', attrs: 'autocomplete="off" enterkeyhint="done"' })}
-        <div class="field"><span class="label">Status</span>${statusSeg(store.orderStatus(o))}</div>
+        <div class="field"><span class="label">Status</span>${statusSeg(initialStatus)}</div>
+        <div class="field" id="after-field"${initialStatus === 'naechstes' ? '' : ' hidden'}>
+          <label for="after">Kommt nach</label>
+          <select id="after" class="input">
+            <option value="">– keinem bestimmten Auftrag –</option>
+            ${afterOptions.map((x) => `<option value="${x.id}"${x.id === initialAfter ? ' selected' : ''}>${esc(x.nr)}${orderSummary(x) ? ` · ${esc(orderSummary(x))}` : ''} (${STATUS_LABEL[store.orderStatus(x)]})</option>`).join('')}
+          </select>
+        </div>
         <p class="form-error" id="err" role="alert"></p>
         <button class="btn btn-primary btn-block" type="submit">Speichern</button>
       </form>
@@ -723,21 +902,23 @@ function viewOrderEdit(id, query) {
       art.addEventListener('input', preview);
       nextOnEnter(nr, art, note);
 
-      let status = store.orderStatus(o);
+      let status = initialStatus;
       const seg = $('.status-seg', root);
       seg.addEventListener('click', (e) => {
         const b = e.target.closest('[data-status]');
         if (!b) return;
         status = b.dataset.status;
         $$('[data-status]', seg).forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+        $('#after-field', root).hidden = status !== 'naechstes';
       });
 
       $('#f', root).addEventListener('submit', (e) => {
         e.preventDefault();
         try {
-          const saved = store.saveOrder({ id: o?.id, nr: nr.value, note: note.value, articleName: art.value, status });
-          toast('Auftrag gespeichert');
-          if (o) back(`#/auftrag/${saved.id}`);
+          const after = status === 'naechstes' ? $('#after', root).value : '';
+          const saved = store.saveOrder({ id: o?.id, nr: nr.value, note: note.value, articleName: art.value, status, after });
+          toast(presetAfter && after === presetAfter ? `${saved.nr} kommt nach ${store.getOrder(after)?.nr}` : 'Auftrag gespeichert');
+          if (o || (presetAfter && after === presetAfter)) back(o ? `#/auftrag/${saved.id}` : `#/auftrag/${presetAfter}`);
           else replace(`#/auftrag/${saved.id}`);
         } catch (ex) {
           $('#err', root).textContent = ex.message;

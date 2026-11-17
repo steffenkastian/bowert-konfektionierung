@@ -21,7 +21,7 @@ Ein Material (Artikelnummer) wird nur einmal gepflegt. Ändert sich sein Lageror
 | Bereich | Wofür |
 | --- | --- |
 | **Suche** (Start) | Auftragsnummer, Artikelbezeichnung, Artikelnummer oder Lagerort eintippen. „202878“ findet auch „630-202878X“. **123** schaltet auf die Zahlentastatur. |
-| **Aufträge** | Status je Auftrag: **Nicht begonnen · In Arbeit · Abgeschlossen** (auf der Auftragsseite mit einem Tipp umschalten, Liste danach filtern, „In Arbeit“ steht auch auf der Startseite). Auftrag anlegen und Artikelbezeichnung zuordnen – beim Tippen („5“) werden passende Artikel vorgeschlagen, inkl. Vorschau der Materialien. Unbekannte Bezeichnungen werden neu angelegt. |
+| **Aufträge** | Status je Auftrag: **Nicht begonnen · Als nächstes · In Arbeit · Abgeschlossen** (auf der Auftragsseite mit einem Tipp umschalten, Liste danach filtern, „In Arbeit“ und „Als nächstes“ stehen auch auf der Startseite). **Als nächstes** wird an einen laufenden Auftrag gekoppelt: Am laufenden Auftrag den nächsten wählen (oder neu anlegen) – dort steht dann „Als nächstes: …“ mit **Starten**-Knopf, in Listen „→ danach …“. Beim Abschließen bietet die App an, den nächsten direkt zu starten. Auftrag anlegen und Artikelbezeichnung zuordnen – beim Tippen („5“) werden passende Artikel vorgeschlagen, inkl. Vorschau der Materialien. Unbekannte Bezeichnungen werden neu angelegt. |
 | **Artikel** | Materialien per Artikelnummer zuordnen. Bekannte Nummern füllen Beschreibung und Lagerort automatisch aus. **Packhinweise:** Foto (direkt mit der Kamera) oder PDF hochladen – erscheint bei jedem Auftrag mit diesem Artikel. Antippen zeigt Foto bzw. alle PDF-Seiten in der App; umbenennen, teilen, löschen. |
 | **Material** | Alle Materialien mit Lagerort, sortierbar. |
 | **Bestellliste** | Überall, wo ein Lagerort steht, gibt es **Entnehmen** → das Material landet hier (mehrfach tippen = Menge +1). Menge anpassen, als *bestellt* markieren, bei Eintreffen abhaken, Liste per WhatsApp/Mail **teilen**. |
@@ -60,7 +60,7 @@ firestore.rules        Zugriffsregeln der Datenbank
 ```
 
 **Neue Version veröffentlichen:** committen und pushen, vorher in `sw.js` die Konstante `CACHE` hochzählen
-(z. B. `konf-v5`), damit installierte Apps die neuen Dateien laden.
+(z. B. `konf-v6`), damit installierte Apps die neuen Dateien laden.
 **Regeln ändern:** `firebase deploy --only firestore`.
 
 **Kostenlos-Grenzen (Spark):** 50.000 Lesevorgänge und 20.000 Schreibvorgänge pro Tag, 1 GB Speicher,
