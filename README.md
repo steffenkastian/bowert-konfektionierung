@@ -5,6 +5,7 @@ welche **Materialien** gebraucht werden und **wo sie im Lager liegen** – und e
 **Bestellliste** setzen. Alle Mitarbeiter arbeiten mit denselben Daten.
 
 **App:** https://steffenkastian.github.io/bowert-konfektionierung/ · Passwort: `bowert`
+**Abrechnung:** https://steffenkastian.github.io/bowert-konfektionierung/abrechnung/ · eigenes langes Passwort (nicht hier notiert)
 
 ## Struktur
 
@@ -29,6 +30,23 @@ Ein Material (Artikelnummer) wird nur einmal gepflegt. Ändert sich sein Lageror
 | **Artikel** | Umschalter **Artikel / Material** oben. Satz pro Palette und Text auf dem Lieferschein (leer = „Konfektionierung - Artikelbezeichnung“). Materialien per Artikelnummer zuordnen. Bekannte Nummern füllen Beschreibung und Lagerort automatisch aus. **Packhinweise:** Foto (direkt mit der Kamera) oder PDF hochladen – erscheint bei jedem Auftrag mit diesem Artikel. Antippen zeigt Foto bzw. alle PDF-Seiten in der App; umbenennen, teilen, löschen. |
 | **Bestellliste** | Überall, wo ein Lagerort steht, gibt es **Entnehmen** → das Material landet hier (mehrfach tippen = Menge +1). Menge anpassen, als *bestellt* markieren, bei Eintreffen abhaken, Liste per WhatsApp/Mail **teilen**. **Umlagerungsschein:** füllt die Excel-Vorlage aus (Menge = Anzahl Paletten in Spalte A bei der passenden Teile-Nr.; unbekannte Teile-Nr. werden unten angehängt) – **Per Mail senden** (iPhone: Teilen-Menü; Android/Computer: Excel wird gespeichert und die Mail-App mit Empfänger + Betreff geöffnet – Datei dort anhängen) oder als Excel speichern, danach optional alles als bestellt markieren. |
 | ⚙ **Mehr** | Nächste Lieferscheinnummer, Umlagerungsschein-Vorlage (.xlsx) hochladen/ersetzen + Mail-Empfänger, Datenbestand, Sicherungskopie (JSON), Anleitung „Als App installieren“, Abmelden. |
+
+## Abrechnung (eigene App)
+
+Unter `/abrechnung/` läuft dieselbe App mit eigenem Konto `abrechnung@bowert-gmbh.de` (langes Zufallspasswort).
+Sie zeigt alle Daten der Konfektionierung (Aufträge, Artikel, Lieferscheine, über ⚙ auch Suche/Material/Bestellliste)
+und zusätzlich:
+
+| Bereich | Wofür |
+| --- | --- |
+| **Umsatz** (Start) | Monat mit ‹ › wählen: Umsatz netto (Monat, heute bzw. Vormonat, Jahr), Balken je Tag und je Monat (antippen = Wert), Tabelle je Artikel. Umsatz = fertig gemeldete Satz × Preis am Liefertag. Satz ohne Preis werden gemeldet. |
+| **Preise** | Am Artikel: Nettopreis pro Satz mit **gültig ab**. Frühere Lieferungen behalten ihren alten Preis; Preise, die schon abgerechnet sind, lassen sich nicht mehr rückwirkend ändern. |
+| **Rechnungen** | Zeitraum wählen (Monate mit offenen Lieferscheinen stehen oben), Lieferscheine je Auftrag an-/abwählen. Positionen je Artikel (und Preis), 19 % USt. **Rechnung erstellen** lädt **eine PDF** herunter: Rechnung im Layout der bisherigen Rechnungen (`pdf.py`), dahinter genau die archivierten Lieferscheine. Nummer wird vorgeschlagen (JJJJ + 4 Ziffern), bitte prüfen – der Nummernkreis wird auch für andere Rechnungen benutzt. |
+| **Storno** | An der Rechnung: erzeugt eine Stornorechnung (eigene Nummer, negative Beträge); die Lieferscheine werden wieder frei. |
+
+Abgerechnete Lieferscheine sind **gesperrt** (keine Einträge, kein Löschen) – auch in der Datenbank-Regel.
+Gespeichert wird: `prices/{Artikel}`, `invoices/{Nummer}` (eingefrorene Positionen, Summen, Lieferscheine mit Fassung),
+`invoicePdfs/{Nummer}` (die Rechnungsseite), `billing/settings`. Diese Sammlungen kann nur das Abrechnungs-Konto lesen.
 
 ## Speicherung & Sicherheit
 
@@ -59,6 +77,10 @@ js/ui.js               Helfer: Suche, Sortierung, Icons, Vorschläge
 js/files.js            Packhinweise: Fotos verkleinern, PDF-Anzeige
 js/lieferschein.js     Lieferschein-PDF (Nachbau der Word-Vorlage, Koordinaten aus der alten PDF)
 js/umlagerung.js       Umlagerungsschein: füllt die Excel-Vorlage auf XML-Ebene aus (Rest bleibt unverändert)
+js/abrechnung.js       Abrechnung: Umsatz-Dashboard, Preise, Rechnungen (nur in /abrechnung/ geladen)
+js/rechnung.js         Rechnungs-PDF (Nachbau von pdf.py) + Zusammenfügen mit den Lieferscheinen
+abrechnung/            Einstieg der Abrechnungs-App (index.html, Manifest, Logo für die Rechnung)
+vendor/pdf-lib/        pdf-lib 1.17.1 (MIT) zum Zusammenfügen von PDFs
 vendor/pdfjs/          pdf.js 4.10.38 (Mozilla, Apache-2.0) zum Anzeigen von PDFs
 vendor/jspdf/          jsPDF 3.0.3 (MIT) zum Erzeugen der Lieferscheine
 vendor/fonts/          Caladea (OFL) – maßgleich zu Cambria aus der Word-Vorlage
@@ -87,7 +109,7 @@ Google-Apps-Script im Gmail-Arbeitskonto ([`mail/Code.gs`](mail/Code.gs)), das d
 5. Unter ⚙ Mehr → Umlagerungsschein den **Mail-Empfänger** eintragen (mehrere mit Komma).
 
 Sicherheit: Die App schickt ihr Anmelde-Token mit, das Skript lässt es von Google prüfen und verschickt nur für das
-Team-Konto. Die Skript-URL steht nur in der (geschützten) Datenbank, nicht im öffentlichen Code.
+Konten der App (Team und Abrechnung). Die Skript-URL steht nur in der (geschützten) Datenbank, nicht im öffentlichen Code.
 Gmail erlaubt ca. 100 Empfänger pro Tag. Wird `Code.gs` geändert: *Bereitstellungen verwalten → Bearbeiten →
 Neue Version* (die URL bleibt gleich).
 

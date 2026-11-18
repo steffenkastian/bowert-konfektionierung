@@ -1,0 +1,19 @@
+{
+  "name": "BO-WERT Abrechnung",
+  "short_name": "Abrechnung",
+  "description": "Umsatz, Preise pro Satz und Rechnungen der Konfektionierung.",
+  "lang": "de",
+  "id": "./",
+  "start_url": "./#/umsatz",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f3f2ef",
+  "theme_color": "#342e3b",
+  "icons": [
+    { "src": "../icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "../icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "../icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "../icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

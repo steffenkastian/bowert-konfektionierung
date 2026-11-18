@@ -1,6 +1,8 @@
 rules_version = '2';
 
-// Nur das gemeinsame Konfektionierungs-Konto (Passwort-Login in der App) darf lesen und schreiben.
+// Zwei Konten, beide mit Passwort-Login in der App:
+//   Team (Konfektionierung): konfektionierung@bowert-gmbh.de
+//   Abrechnung:              abrechnung@bowert-gmbh.de – darf alles, was das Team darf, plus Preise und Rechnungen
 // Wichtig: Die E-Mail-Prüfung verhindert, dass jemand mit einem selbst angelegten Konto zugreift.
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -8,10 +10,39 @@ service cloud.firestore {
       return request.auth != null
         && request.auth.token.email == 'konfektionierung@bowert-gmbh.de';
     }
+    function isBilling() {
+      return request.auth != null
+        && request.auth.token.email == 'abrechnung@bowert-gmbh.de';
+    }
+    // Lieferschein ist abgerechnet (steht auf einer Rechnung) → für das Team gesperrt
+    function invoiced(deliveryId) {
+      let path = /databases/$(database)/documents/deliveries/$(deliveryId);
+      return exists(path) && ('invoice' in get(path).data);
+    }
 
     match /{collection}/{id} {
-      allow read, write: if isTeam()
-        && collection in ['orders', 'articles', 'materials', 'orderlist', 'files', 'deliveries', 'settings', 'archive'];
+      // Konfektionierung: Team und Abrechnung
+      allow read, write: if (isTeam() || isBilling())
+        && collection in ['orders', 'articles', 'materials', 'orderlist', 'files', 'settings'];
+      // Preise, Rechnungen: nur Abrechnung
+      allow read, write: if isBilling()
+        && collection in ['prices', 'invoices', 'invoicePdfs', 'billing'];
+    }
+
+    match /deliveries/{id} {
+      allow read: if isTeam() || isBilling();
+      allow write: if isBilling();
+      // Team: nur, solange nicht abgerechnet – und das Abrechnungs-Kennzeichen nie selbst setzen
+      allow create: if isTeam() && !('invoice' in request.resource.data);
+      allow update: if isTeam() && !('invoice' in resource.data) && !('invoice' in request.resource.data);
+      allow delete: if isTeam() && !('invoice' in resource.data);
+    }
+
+    match /archive/{id} {
+      allow read: if isTeam() || isBilling();
+      allow write: if isBilling();
+      allow create, update: if isTeam() && !invoiced(request.resource.data.deliveryId);
+      allow delete: if isTeam() && !invoiced(resource.data.deliveryId);
     }
   }
 }

@@ -27,6 +27,13 @@
 //   orderlist/{id}  { materialId, qty, status }           Bestellliste: status „offen“ | „bestellt“
 //                   offene Einträge haben die feste ID „offen-<materialId>“, damit mehrere Handys
 //                   gleichzeitig hochzählen können, ohne doppelte Zeilen zu erzeugen.
+//
+// Nur Abrechnungs-Konto (für das Team-Konto in firestore.rules gesperrt):
+//   prices/{articleId}  { list: [{ from: 'JJJJ-MM-TT', price }] }   Nettopreis pro Satz ab Datum
+//   invoices/{nr}       Rechnung bzw. Storno mit eingefrorenen Daten (Positionen, Summen, Lieferscheine + Fassung)
+//   invoicePdfs/{nr}    { pdf: Bytes }  die erstellte Rechnung; die Lieferscheine kommen aus dem Archiv dahinter
+//   billing/settings    { nextInvoiceNo }
+// Abgerechnete Lieferscheine tragen invoice: { id, no } und sind gesperrt (auch in den Regeln).
 
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {
@@ -35,18 +42,22 @@ import {
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
   collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, writeBatch,
-  increment, arrayUnion, arrayRemove, getDoc, getDocFromCache, Bytes, runTransaction,
+  increment, arrayUnion, arrayRemove, getDoc, getDocFromCache, Bytes, runTransaction, deleteField,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
-import { firebaseConfig, TEAM_EMAIL } from './config.js';
+import { firebaseConfig, TEAM_EMAIL, BILLING_EMAIL, IS_BILLING } from './config.js';
 import { norm, natCmp } from './ui.js';
 
-const app = initializeApp(firebaseConfig);
+// Eigener App-Name für die Abrechnung → eigene Anmeldung und eigener Offline-Cache im selben Browser.
+const app = IS_BILLING ? initializeApp(firebaseConfig, 'abrechnung') : initializeApp(firebaseConfig);
+export { IS_BILLING };
+export const ACCOUNT_EMAIL = IS_BILLING ? BILLING_EMAIL : TEAM_EMAIL;
 const auth = getAuth(app);
 const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
 });
 
-const COLLECTIONS = ['orders', 'articles', 'materials', 'orderlist', 'deliveries', 'settings'];
+const COLLECTIONS = ['orders', 'articles', 'materials', 'orderlist', 'deliveries', 'settings',
+  ...(IS_BILLING ? ['prices', 'invoices', 'billing'] : [])];
 const data = Object.fromEntries(COLLECTIONS.map((c) => [c, new Map()]));
 const meta = {};
 const loaded = new Set();
@@ -69,7 +80,9 @@ export const onError = (fn) => { errorHandler = fn; };
 // ---------- Anmeldung ----------
 
 export const watchAuth = (cb) => onAuthStateChanged(auth, cb);
-export const login = (password) => signInWithEmailAndPassword(auth, TEAM_EMAIL, password);
+export const login = (password) => signInWithEmailAndPassword(auth, ACCOUNT_EMAIL, password);
+/** Angemeldet, aber mit dem falschen Konto für diese App (z. B. alte Sitzung)? */
+export const isRightAccount = (user) => user?.email === ACCOUNT_EMAIL;
 /** Anmelde-Token für den Mail-Dienst (wird dort bei Google geprüft). */
 export function idToken() {
   if (!auth.currentUser) return Promise.reject(new Error('Nicht angemeldet.'));
@@ -548,6 +561,13 @@ export const deliveredBefore = (d) => deliveriesOfOrder(d.orderId)
   .filter((x) => x.no && x.id !== d.id && x.date < d.date)
   .reduce((sum, x) => sum + deliveryQty(x), 0);
 
+/** Abgerechnet → gesperrt (erst nach Storno der Rechnung wieder änderbar). */
+export const invoiceOf = (d) => d?.invoice || null;
+export function assertEditable(d) {
+  const inv = invoiceOf(d);
+  if (inv) throw new Error(`Lieferschein ${d.no} ist abgerechnet (Rechnung ${formatInvoiceNo(inv.no)}) und kann nicht mehr geändert werden.`);
+}
+
 function checkEntry({ qty, pallets, date }) {
   const q = parseCount(qty, 'Satz');
   const p = parseCount(pallets, 'Paletten') ?? 0;
@@ -568,6 +588,7 @@ export function addEntry(orderId, { date = localDate(), qty, pallets }) {
   const id = deliveryKey(orderId, date);
   const entry = { id: newId('deliveries'), at: now(), ...v };
   const existing = data.deliveries.get(id);
+  assertEditable(existing);
   run(setDoc(doc(db, 'deliveries', id), {
     orderId, date, ...snapshotFields(o), entries: arrayUnion(entry), updatedAt: now(),
   }, { merge: true }));
@@ -581,6 +602,7 @@ export function updateEntry(deliveryId, entryId, { date, qty, pallets }) {
   const d = data.deliveries.get(deliveryId);
   const old = d?.entries?.find((e) => e.id === entryId);
   if (!old) throw new Error('Eintrag nicht gefunden.');
+  assertEditable(d);
   const v = checkEntry({ qty, pallets, date });
   if (date === d.date) {
     const entries = d.entries.map((e) => (e.id === entryId ? { ...e, ...v } : e));
@@ -600,6 +622,7 @@ export function updateEntry(deliveryId, entryId, { date, qty, pallets }) {
   }
   const o = getOrder(d.orderId);
   const targetId = deliveryKey(d.orderId, date);
+  assertEditable(data.deliveries.get(targetId));
   const moved = { ...old, ...v };
   batch.set(doc(db, 'deliveries', targetId), {
     orderId: d.orderId, date, ...snapshotFields(o) , entries: arrayUnion(moved), updatedAt: now(),
@@ -615,6 +638,7 @@ export function updateEntry(deliveryId, entryId, { date, qty, pallets }) {
 export function removeDeliveryEntry(deliveryId, entryId) {
   const d = data.deliveries.get(deliveryId);
   if (!d) return;
+  assertEditable(d);
   const rest = (d.entries || []).filter((e) => e.id !== entryId);
   if (!rest.length && !d.no) {
     run(deleteDoc(doc(db, 'deliveries', d.id)));
@@ -628,6 +652,7 @@ export function removeDeliveryEntry(deliveryId, entryId) {
 
 export function deleteDelivery(id) {
   const d = data.deliveries.get(id);
+  assertEditable(d);
   for (const v of d?.versions || []) run(deleteDoc(doc(db, 'archive', `${id}_v${v.v}`)));
   run(deleteDoc(doc(db, 'deliveries', id)));
   data.deliveries.delete(id);
@@ -718,7 +743,7 @@ export function archiveNotes(notes, sentTo = '', { replaceVersions = false, lega
   const batch = writeBatch(db);
   for (const { id, note, pdf } of notes) {
     const d = data.deliveries.get(id);
-    if (!d?.no) continue;
+    if (!d?.no || invoiceOf(d)) continue;
     const versions = replaceVersions ? [] : [...(d.versions || [])];
     const v = (versions.reduce((m, x) => Math.max(m, x.v), 0)) + 1;
     const meta = { v, at: now(), qty: note.qty, pallets: note.pallets, sentTo: str(sentTo), ...(legacy ? { legacy: true } : {}) };
@@ -731,8 +756,10 @@ export function archiveNotes(notes, sentTo = '', { replaceVersions = false, lega
     batch.update(doc(db, 'deliveries', id), { versions: all, snap: frozen, updatedAt: now() });
     Object.assign(d, { versions: all, snap: frozen });
   }
-  run(batch.commit());
+  const done = batch.commit();
+  run(done);
   emit();
+  return done;
 }
 
 /** Archiviertes PDF einer Fassung laden. */
@@ -809,10 +836,246 @@ export function exportJSON() {
     app: 'bowert-konfektionierung', version: 2, exportedAt: now(),
     orders: orders(), articles: articles(), materials: materials(), orderlist: orderlist(),
     deliveries: deliveries().map((d) => ({ ...d, qty: deliveryQty(d), pallets: deliveryPallets(d) })),
+    ...(IS_BILLING ? { prices: [...data.prices.values()], invoices: invoices() } : {}),
   }, null, 2);
 }
 
 function withoutId(obj) {
   const { id, ...rest } = obj;
   return rest;
+}
+
+// ======================================================================
+// Abrechnung: Preise, Umsatz, Rechnungen (nur in der Abrechnungs-App)
+// ======================================================================
+
+export const VAT_RATE = 0.19;
+const DEFAULT_INVOICE_NO = 20260548;
+export const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
+
+// ---------- Preise ----------
+
+/** „0,4525“ / „0.4525“ / „1.234,50 €“ → Zahl (max. 4 Nachkommastellen). */
+export function parsePrice(v) {
+  let t = str(v).replace(/[€\s]/g, '');
+  if (!t) throw new Error('Bitte einen Preis eingeben.');
+  if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.');
+  if (!/^\d+(\.\d{1,4})?$/.test(t)) throw new Error('Preis bitte als Zahl mit höchstens 4 Nachkommastellen, z. B. 0,4525.');
+  const n = Number(t);
+  if (!(n > 0)) throw new Error('Der Preis muss größer als 0 sein.');
+  return n;
+}
+
+/** Preisliste eines Artikels, älteste zuerst. */
+export const priceList = (articleId) => [...(data.prices?.get(articleId)?.list || [])].sort((a, b) => a.from.localeCompare(b.from));
+/** Preis, der an einem Tag galt (oder null). */
+export function priceAt(articleId, date) {
+  let p = null;
+  for (const x of priceList(articleId)) if (x.from <= date) p = x.price;
+  return p;
+}
+export const currentPrice = (articleId) => priceAt(articleId, localDate());
+
+function writePrices(articleId, list) {
+  list.sort((a, b) => a.from.localeCompare(b.from));
+  run(setDoc(doc(db, 'prices', articleId), { list, updatedAt: now() }));
+  data.prices.set(articleId, { id: articleId, list });
+  emit();
+}
+
+/** Lieferscheine dieses Artikels, deren Preis sich durch die Änderung verschieben würde und die schon abgerechnet sind. */
+function billedAffected(articleId, list) {
+  const at = (date) => { let p = null; for (const x of list) if (x.from <= date) p = x.price; return p; };
+  return deliveries().find((d) => invoiceOf(d) && articleOf(d) === articleId && at(d.date) !== priceAt(articleId, d.date));
+}
+
+export function setPrice(articleId, { from, price }) {
+  if (!getArticle(articleId)) throw new Error('Artikel nicht gefunden.');
+  if (!isDate(from)) throw new Error('Bitte das Datum wählen, ab dem der Preis gilt.');
+  const p = parsePrice(price);
+  const list = [...priceList(articleId).filter((x) => x.from !== from), { from, price: p }].sort((a, b) => a.from.localeCompare(b.from));
+  const hit = billedAffected(articleId, list);
+  if (hit) throw new Error(`Das würde den schon abgerechneten Lieferschein ${hit.no} (${hit.date}) ändern. Bitte ein späteres Datum wählen.`);
+  writePrices(articleId, list);
+}
+
+export function removePrice(articleId, from) {
+  const list = priceList(articleId).filter((x) => x.from !== from);
+  const hit = billedAffected(articleId, list);
+  if (hit) throw new Error(`Der Preis wurde schon abgerechnet (Lieferschein ${hit.no}) und kann nicht gelöscht werden.`);
+  writePrices(articleId, list);
+}
+
+// ---------- Umsatz ----------
+
+export const articleOf = (d) => getOrder(d.orderId)?.articleId || '';
+
+/** Je Lieferung (Auftrag + Tag): Satz × Preis am Liefertag. amount = null, wenn der Preis fehlt. */
+export function revenueRows() {
+  const out = [];
+  for (const d of deliveries()) {
+    const qty = deliveryQty(d);
+    if (!qty) continue;
+    const articleId = articleOf(d);
+    const price = articleId ? priceAt(articleId, d.date) : null;
+    out.push({ d, date: d.date, articleId, qty, price, amount: price == null ? null : qty * price });
+  }
+  return out;
+}
+
+// ---------- Rechnungen ----------
+
+export const invoices = () => [...(data.invoices?.values() || [])];
+export const getInvoice = (id) => data.invoices?.get(id);
+/** 20260548 → „2026 0548“ */
+export const formatInvoiceNo = (no) => { const t = String(no || ''); return t.length === 8 ? `${t.slice(0, 4)} ${t.slice(4)}` : t; };
+
+/** Vorschlag für die nächste Nummer (der Nummernkreis wird auch außerhalb der App benutzt → beim Erstellen prüfen). */
+export function nextInvoiceNo(year = new Date().getFullYear()) {
+  const used = invoices().map((i) => Number(i.no)).filter(Boolean);
+  let next = Math.max(Number(data.billing?.get('settings')?.nextInvoiceNo) || DEFAULT_INVOICE_NO, ...used.map((n) => n + 1));
+  if (Math.floor(next / 10000) < year) next = year * 10000 + 1;
+  return next;
+}
+
+export function checkInvoiceNo(value) {
+  const n = parseCount(value, 'Rechnungsnummer');
+  if (!n || String(n).length !== 8) throw new Error('Die Rechnungsnummer hat 8 Ziffern, z. B. 20260548 (= 2026 0548).');
+  if (data.invoices.has(String(n))) throw new Error(`Rechnung ${formatInvoiceNo(n)} gibt es schon.`);
+  return String(n);
+}
+
+/** Lieferscheine eines Zeitraums, die noch nicht abgerechnet sind (+ Lieferungen ohne Lieferschein). */
+export function billable(from, to) {
+  const inRange = deliveries().filter((d) => d.date >= from && d.date <= to && deliveryQty(d) && !invoiceOf(d));
+  return {
+    notes: inRange.filter((d) => d.no).sort((a, b) => String(a.no).localeCompare(String(b.no))),
+    withoutNo: inRange.filter((d) => !d.no).sort((a, b) => a.date.localeCompare(b.date)),
+  };
+}
+
+/** Positionen je Artikel (und Preis), Summen, Kopfdaten – aus den gewählten Lieferscheinen. */
+export function buildInvoice(list) {
+  const groups = new Map();
+  const missing = new Map();
+  for (const d of list) {
+    const articleId = articleOf(d);
+    const n = noteData(d);
+    const price = articleId ? priceAt(articleId, d.date) : null;
+    if (price == null) { missing.set(articleId || d.id, getArticle(articleId)?.name || n.text || `Lieferschein ${d.no}`); continue; }
+    const key = `${articleId}|${price}`;
+    const g = groups.get(key) || { articleId, text: n.text, price, qty: 0 };
+    g.qty += n.qty;
+    groups.set(key, g);
+  }
+  const items = [...groups.values()]
+    .sort((a, b) => natCmp(a.text, b.text) || a.price - b.price)
+    .map((g) => ({ ...g, total: round2(g.qty * g.price) }));
+  const netto = round2(items.reduce((s, i) => s + i.total, 0));
+  const ust = round2(netto * VAT_RATE);
+  const notes = list.map(noteData);
+  const uniq = (xs) => [...new Set(xs.filter(Boolean))];
+  return {
+    items, netto, ust, brutto: round2(netto + ust),
+    missing: [...missing.values()],
+    lieferdatum: list.reduce((m, d) => (d.date > m ? d.date : m), ''),
+    orderNrs: uniq(notes.map((n) => n.orderNr)),
+    bestellnrs: uniq(notes.map((n) => n.bestellnr)),
+  };
+}
+
+/**
+ * Rechnung festschreiben (Transaktion): Nummer prüfen, Lieferscheine sperren, Daten einfrieren.
+ * Die Lieferscheine müssen vorher in ihrer aktuellen Fassung archiviert sein.
+ */
+export async function createInvoice({ no, date, from, to, list, extraLine = '', note = '' }) {
+  if (!navigator.onLine) throw new Error('Zum Erstellen der Rechnung wird eine Internetverbindung gebraucht.');
+  no = checkInvoiceNo(no);
+  if (!isDate(date)) throw new Error('Bitte das Rechnungsdatum wählen.');
+  if (!list.length) throw new Error('Keine Lieferscheine ausgewählt.');
+  const { missing, ...calc } = buildInvoice(list);
+  if (missing.length) throw new Error(`Preis fehlt: ${missing.join(', ')}`);
+  const refs = list.map((d) => {
+    const l = lastSent(d);
+    if (!l || l.legacy || deliveryChanged(d)) throw new Error(`Lieferschein ${d.no} ist noch nicht archiviert.`);
+    const n = noteData(d);
+    return { id: d.id, v: l.v, no: d.no, date: d.date, qty: n.qty, pallets: n.pallets, orderNr: n.orderNr, bestellnr: n.bestellnr };
+  }).sort((a, b) => String(a.no).localeCompare(String(b.no)));
+  const invoice = {
+    no, type: 'rechnung', status: 'gueltig', date, from, to, ...calc,
+    extraLine: str(extraLine), note: str(note), deliveries: refs, createdAt: now(),
+  };
+  const invRef = doc(db, 'invoices', no);
+  await runTransaction(db, async (tx) => {
+    if ((await tx.get(invRef)).exists()) throw new Error(`Rechnung ${formatInvoiceNo(no)} gibt es schon.`);
+    const snaps = [];
+    for (const r of refs) snaps.push(await tx.get(doc(db, 'deliveries', r.id)));
+    snaps.forEach((snap, i) => {
+      const d = snap.exists() ? snap.data() : null;
+      if (!d) throw new Error(`Lieferschein ${refs[i].no} wurde gelöscht.`);
+      if (d.invoice) throw new Error(`Lieferschein ${refs[i].no} ist schon abgerechnet (Rechnung ${formatInvoiceNo(d.invoice.no)}).`);
+      if (deliveryQty(d) !== refs[i].qty) throw new Error(`Lieferschein ${refs[i].no} wurde gerade geändert – bitte neu laden.`);
+    });
+    tx.set(invRef, invoice);
+    for (const r of refs) tx.update(doc(db, 'deliveries', r.id), { invoice: { id: no, no }, updatedAt: now() });
+    tx.set(doc(db, 'billing', 'settings'), { nextInvoiceNo: Number(no) + 1, updatedAt: now() }, { merge: true });
+  });
+  data.invoices.set(no, { id: no, ...invoice });
+  for (const r of refs) Object.assign(data.deliveries.get(r.id) || {}, { invoice: { id: no, no } });
+  emit();
+  return data.invoices.get(no);
+}
+
+/** Storno: eigene Storno-Rechnung (negativ), Original „storniert“, Lieferscheine wieder frei. */
+export async function cancelInvoice(id, { no, date }) {
+  if (!navigator.onLine) throw new Error('Zum Stornieren wird eine Internetverbindung gebraucht.');
+  const orig = getInvoice(id);
+  if (!orig || orig.type !== 'rechnung' || orig.status === 'storniert') throw new Error('Diese Rechnung kann nicht storniert werden.');
+  no = checkInvoiceNo(no);
+  if (!isDate(date)) throw new Error('Bitte das Datum wählen.');
+  const neg = (n) => round2(-n);
+  const storno = {
+    no, type: 'storno', status: 'gueltig', refNo: orig.no, date, from: orig.from, to: orig.to,
+    items: orig.items.map((i) => ({ ...i, qty: -i.qty, total: neg(i.total) })),
+    netto: neg(orig.netto), ust: neg(orig.ust), brutto: neg(orig.brutto),
+    lieferdatum: orig.lieferdatum, orderNrs: orig.orderNrs, bestellnrs: orig.bestellnrs,
+    extraLine: '', note: '', deliveries: orig.deliveries, createdAt: now(),
+  };
+  const sRef = doc(db, 'invoices', no);
+  await runTransaction(db, async (tx) => {
+    if ((await tx.get(sRef)).exists()) throw new Error(`Rechnung ${formatInvoiceNo(no)} gibt es schon.`);
+    const snaps = [];
+    for (const r of orig.deliveries) snaps.push(await tx.get(doc(db, 'deliveries', r.id)));
+    tx.set(sRef, storno);
+    tx.update(doc(db, 'invoices', orig.id), { status: 'storniert', stornoNo: no, updatedAt: now() });
+    snaps.forEach((snap, i) => {
+      if (snap.exists() && snap.data().invoice?.id === orig.id) {
+        tx.update(doc(db, 'deliveries', orig.deliveries[i].id), { invoice: deleteField(), updatedAt: now() });
+      }
+    });
+    tx.set(doc(db, 'billing', 'settings'), { nextInvoiceNo: Number(no) + 1, updatedAt: now() }, { merge: true });
+  });
+  data.invoices.set(no, { id: no, ...storno });
+  Object.assign(data.invoices.get(orig.id), { status: 'storniert', stornoNo: no });
+  for (const r of orig.deliveries) {
+    const d = data.deliveries.get(r.id);
+    if (d?.invoice?.id === orig.id) delete d.invoice;
+  }
+  emit();
+  return data.invoices.get(no);
+}
+
+/** PDF der Rechnung (nur die Rechnungsseiten) ablegen / laden. */
+export function saveInvoicePdf(id, bytes) {
+  if (bytes.length > 950_000) throw new Error('Das Rechnungs-PDF ist zu groß zum Archivieren.');
+  const p = setDoc(doc(db, 'invoicePdfs', id), { pdf: Bytes.fromUint8Array(bytes), size: bytes.length, at: now() });
+  run(p);
+  return p;
+}
+export async function loadInvoicePdf(id) {
+  const ref = doc(db, 'invoicePdfs', id);
+  let snap = await getDocFromCache(ref).catch(() => null);
+  if (!snap?.exists()) snap = await getDoc(ref);
+  return snap.exists() ? snap.data().pdf.toUint8Array() : null;
 }

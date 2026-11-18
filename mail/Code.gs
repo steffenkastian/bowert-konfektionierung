@@ -9,11 +9,12 @@
  *   4. Die Web-App-URL (endet auf /exec) in der App unter ⚙ Mehr → „Mailversand“ eintragen
  *
  * Sicherheit: Die App schickt ihr Anmelde-Token mit. Das Skript lässt es von Google prüfen und
- * verschickt nur, wenn es zum Team-Konto der App gehört. Ohne gültige Anmeldung passiert nichts.
+ * verschickt nur, wenn es zu einem Konto der App gehört. Ohne gültige Anmeldung passiert nichts.
  */
 
 const FIREBASE_API_KEY = 'AIzaSyBtfSW3aUZBWwwSNYiPE5IYizSrg386HGE';
-const TEAM_EMAIL = 'konfektionierung@bowert-gmbh.de';
+// Konten der App, die verschicken dürfen (Konfektionierung und Abrechnung)
+const APP_KONTEN = ['konfektionierung@bowert-gmbh.de', 'abrechnung@bowert-gmbh.de'];
 const ABSENDER_NAME = 'BO-WERT Konfektionierung';
 const MAX_EMPFAENGER = 5;
 const MAX_ANHANG_BYTES = 8 * 1024 * 1024;
@@ -62,7 +63,7 @@ function doPost(e) {
   }
 }
 
-/** Prüft bei Google, ob das Token gültig ist und zum Team-Konto der App gehört. */
+/** Prüft bei Google, ob das Token gültig ist und zu einem Konto der App gehört. */
 function pruefeAnmeldung(idToken) {
   if (!idToken) throw new Error('Nicht angemeldet.');
   const res = UrlFetchApp.fetch(
@@ -72,7 +73,7 @@ function pruefeAnmeldung(idToken) {
   if (res.getResponseCode() !== 200) throw new Error('Anmeldung ungültig – bitte in der App neu anmelden.');
   const daten = JSON.parse(res.getContentText());
   const nutzer = daten.users && daten.users[0];
-  if (!nutzer || nutzer.email !== TEAM_EMAIL) throw new Error('Keine Berechtigung.');
+  if (!nutzer || APP_KONTEN.indexOf(nutzer.email) < 0) throw new Error('Keine Berechtigung.');
 }
 
 function antwort(obj) {

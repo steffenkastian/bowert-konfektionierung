@@ -9,7 +9,12 @@ import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 import { deliveryPdf } from './lieferschein.js';
 import { fillUmlagerung, readTemplate, loadFflate, digits } from './umlagerung.js';
 
-const APP_VERSION = '3.3.1';
+const APP_VERSION = '3.4.0';
+// Abrechnungs-App (abrechnung/index.html): eigenes Konto, zusätzlich Umsatz, Preise, Rechnungen.
+const IS_BILLING = store.IS_BILLING;
+const billing = IS_BILLING ? await import('./abrechnung.js') : null;
+const APP_NAME = IS_BILLING ? 'Abrechnung' : 'Konfektionierung';
+const HOME = IS_BILLING ? '#/umsatz' : '#/suche';
 const PREFS_KEY = 'konf.ui';
 const LIST_LIMIT = 40;
 const CODE_ATTRS = 'autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false"';
@@ -58,7 +63,7 @@ const AUTH_ERRORS = {
   'auth/invalid-credential': 'Das Passwort stimmt nicht.',
   'auth/invalid-login-credentials': 'Das Passwort stimmt nicht.',
   'auth/wrong-password': 'Das Passwort stimmt nicht.',
-  'auth/user-not-found': 'Das Team-Konto ist noch nicht eingerichtet.',
+  'auth/user-not-found': IS_BILLING ? 'Das Abrechnungs-Konto ist noch nicht eingerichtet.' : 'Das Team-Konto ist noch nicht eingerichtet.',
   'auth/network-request-failed': 'Keine Internetverbindung. Für die Anmeldung wird einmal Internet gebraucht.',
   'auth/too-many-requests': 'Zu viele Versuche. Bitte kurz warten.',
   'auth/operation-not-allowed': 'Die Anmeldung ist in Firebase noch nicht aktiviert.',
@@ -74,7 +79,7 @@ $('#login-form').addEventListener('submit', async (e) => {
   button.disabled = true;
   try {
     // Klein geschrieben – Handy-Tastaturen schreiben gern „Bowert“.
-    await store.login(pw.value.trim().toLowerCase());
+    await store.login(IS_BILLING ? pw.value.trim() : pw.value.trim().toLowerCase());
     pw.blur();
   } catch (ex) {
     msg.textContent = AUTH_ERRORS[ex.code] || `Anmeldung fehlgeschlagen (${ex.code || ex.message}).`;
@@ -102,7 +107,7 @@ let renderedHash = null;
 let currentView = null;
 const scrollPos = new Map();
 
-const currentHash = () => location.hash || '#/suche';
+const currentHash = () => location.hash || HOME;
 const go = (hash) => { location.hash = hash; };
 
 function replace(hash) {
@@ -165,7 +170,7 @@ function render() {
   const h = currentHash();
   let view = null;
   if (!store.isReady()) {
-    view = { title: 'Konfektionierung', loading: true, html:'<div class="loading"><span class="spinner"></span>Daten werden geladen …</div>' };
+    view = { title: APP_NAME, loading: true, html:'<div class="loading"><span class="spinner"></span>Daten werden geladen …</div>' };
   } else {
     for (const [re, make] of routes) {
       const m = h.match(re);
@@ -179,7 +184,7 @@ function render() {
 function mount(view) {
   currentView = view;
   $('#title').textContent = view.title;
-  document.title = `${view.title} · Konfektionierung`;
+  document.title = `${view.title} · ${APP_NAME}`;
   const backBtn = $('#back');
   backBtn.hidden = !view.back;
   backBtn.onclick = () => back(view.back);
@@ -220,8 +225,10 @@ function scheduleRefresh() {
 function updateChrome() {
   const open = store.orderlist().filter((e) => e.status === 'offen').length;
   const badge = $('#orderlist-badge');
-  badge.textContent = open;
-  badge.hidden = !open;
+  if (badge) {
+    badge.textContent = open;
+    badge.hidden = !open;
+  }
   const sync = $('#sync');
   const { pending } = store.syncState();
   if (!navigator.onLine) {
@@ -463,9 +470,9 @@ function rank(list, score, tiebreak) {
 function notFound(kind = 'Seite') {
   return {
     title: 'Nicht gefunden',
-    back: '#/suche',
+    back: HOME,
     html: emptyBox(`${kind} nicht gefunden`, 'Der Eintrag wurde vielleicht gelöscht.',
-      '<a class="btn btn-primary" href="#/suche">Zur Suche</a>'),
+      `<a class="btn btn-primary" href="${HOME}">Zur Startseite</a>`),
   };
 }
 
@@ -1027,6 +1034,7 @@ function viewArticle(id) {
         <div class="kv"><span>Satz pro Palette</span><span>${a.perPallet ? `<b>${fmtN(a.perPallet)}</b>` : '<span class="warn-text">fehlt</span>'}</span></div>
         <div class="kv"><span>Lieferschein-Text</span><span>${esc(store.lsTextOf(a))}</span></div>
       </a>
+      ${billing ? billing.articlePriceBox(a) : ''}
       ${sectionTitle('Materialien', nMat)}
       ${nMat ? `<div class="card art">${materialList(a)}</div>` : ''}
       <a class="btn btn-primary btn-block" href="#/artikel/${a.id}/material/neu">${icon.plus}<span>Material hinzufügen</span></a>
@@ -1036,6 +1044,9 @@ function viewArticle(id) {
       ${sectionTitle('Aufträge mit diesem Artikel', ords.length)}
       ${ords.length ? `<ul class="card list">${ords.map(orderRow).join('')}</ul>`
         : '<p class="hint">Noch keinem Auftrag zugeordnet.</p>'}`,
+    mount(root) {
+      billing?.bindArticlePriceBox(root, a);
+    },
   };
 }
 
@@ -1298,7 +1309,7 @@ function deliveryRow(d, { showDate = false } = {}) {
     href: `#/lieferschein/${d.id}`,
     title: d.no ? `Nr. ${esc(d.no)}` : `Auftrag ${esc(nr)}`,
     sub: esc(sub),
-    tag: STATE_TAG[store.deliveryState(d)],
+    tag: store.invoiceOf(d) ? '<span class="tag tag-ok">abgerechnet</span>' : STATE_TAG[store.deliveryState(d)],
   });
 }
 
@@ -1537,6 +1548,7 @@ function viewDelivery(id) {
   const st = store.deliveryState(d);
   const sentV = store.lastSent(d);
   const versions = [...(d.versions || [])].sort((x, y) => y.v - x.v);
+  const inv = store.invoiceOf(d);
   const kv = (k, v) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`;
   const view = {
     title: d.no ? 'Lieferschein' : 'Lieferung',
@@ -1548,7 +1560,8 @@ function viewDelivery(id) {
         <div class="detail-title">${d.no ? `Nr. ${esc(d.no)}` : nrHtml(n.orderNr.replace(store.ORDER_PREFIX, ''))}</div>
         <div class="detail-sub">${esc(dayLabel(d.date))}</div>
       </div>
-      ${st === 'geaendert' ? `<p class="notice">Nach dem Versand geändert (verschickt: ${fmtN(sentV.qty)} Satz / ${palLabel(sentV.pallets)}) – bitte die korrigierte Fassung senden.</p>` : ''}
+      ${inv ? `<p class="notice notice-ok">Abgerechnet mit ${billing ? `<a href="#/rechnung/${esc(inv.id)}">Rechnung ${esc(store.formatInvoiceNo(inv.no))}</a>` : `Rechnung ${esc(store.formatInvoiceNo(inv.no))}`} – kann nicht mehr geändert werden.</p>` : ''}
+      ${st === 'geaendert' && !inv ? `<p class="notice">Nach dem Versand geändert (verschickt: ${fmtN(sentV.qty)} Satz / ${palLabel(sentV.pallets)}) – bitte die korrigierte Fassung senden.</p>` : ''}
       ${st === 'erstellt' ? '<p class="notice notice-soft">Noch nicht verschickt.</p>' : ''}
       <div class="card kvs">
         ${kv('Auftrag', o ? `<a href="#/auftrag/${o.id}">${esc(n.orderNr)}</a>` : esc(n.orderNr))}
@@ -1560,7 +1573,7 @@ function viewDelivery(id) {
         ${kv('Liefermenge', `${fmtN(n.prev)} + ${fmtN(n.qty)} = <b>${fmtN(n.prev + n.qty)}</b>${n.total ? ` von ${fmtN(n.total)}` : ''}`)}
         ${d.no ? kv('Erstellt', fmtDay(d.createdOn)) : ''}
       </div>
-      ${d.no && canAutoSend() && st !== 'verschickt' ? `<button type="button" class="btn btn-primary btn-block" id="send">${icon.send}<span>${st === 'geaendert' ? 'Korrigierte Fassung senden' : 'Senden'}</span></button>
+      ${d.no && !inv && canAutoSend() && st !== 'verschickt' ? `<button type="button" class="btn btn-primary btn-block" id="send">${icon.send}<span>${st === 'geaendert' ? 'Korrigierte Fassung senden' : 'Senden'}</span></button>
            <p class="hint center">an ${esc(store.lsMailTo())}</p>` : ''}
       ${d.no ? `<button type="button" class="btn ${canAutoSend() && st !== 'verschickt' ? 'btn-secondary' : 'btn-primary'} btn-block" id="share">${icon.share}<span>PDF teilen / drucken</span></button>`
         : `<button type="button" class="btn btn-primary btn-block" id="create" ${n.qty ? '' : 'disabled'}>${icon.check}<span>Lieferschein erstellen</span></button>
@@ -1578,8 +1591,8 @@ function viewDelivery(id) {
         title: `${fmtN(e.qty)} Satz · ${palLabel(Number(e.pallets) || 0)}`,
         sub: esc(e.at ? new Date(e.at).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''),
       })).join('')}</ul>` : '<p class="hint">Keine Einträge.</p>'}
-      <a class="btn btn-secondary btn-block" href="#/eintrag/neu?auftrag=${d.orderId}&datum=${d.date}">${icon.plus}<span>Eintrag hinzufügen</span></a>
-      ${deleteButton(d.no ? 'Lieferschein löschen' : 'Lieferung löschen')}`,
+      ${inv ? '' : `<a class="btn btn-secondary btn-block" href="#/eintrag/neu?auftrag=${d.orderId}&datum=${d.date}">${icon.plus}<span>Eintrag hinzufügen</span></a>
+      ${deleteButton(d.no ? 'Lieferschein löschen' : 'Lieferung löschen')}`}`,
     mount(root) {
       const box = $('#pdf-box', root);
       const showPreview = async () => {
@@ -1623,11 +1636,11 @@ function viewDelivery(id) {
       });
       $('#create', root)?.addEventListener('click', (e) => createNotes([d.id], e.currentTarget));
       if (d.no) pdfFile([d]).catch(() => {});
-      $('#del', root).addEventListener('click', () => {
+      $('#del', root)?.addEventListener('click', () => {
         const what = d.no ? `Lieferschein ${d.no}` : 'diese Lieferung';
         const sentNote = d.versions?.length ? '\n\nACHTUNG: Er wurde bereits verschickt – das Archiv wird mit gelöscht.' : '';
         if (!confirm(`${what} mit allen Einträgen löschen?${d.no ? '\n\nDie Nummer wird nicht neu vergeben.' : ''}${sentNote}`)) return;
-        store.deleteDelivery(d.id);
+        try { store.deleteDelivery(d.id); } catch (ex) { toast(ex.message, 'error'); return; }
         toast(d.no ? `Lieferschein ${d.no} gelöscht` : 'Lieferung gelöscht');
         back(view.back);
       });
@@ -1643,6 +1656,15 @@ function viewEntryEdit(deliveryId, entryId, query) {
   const d = deliveryId ? store.getDelivery(deliveryId) : null;
   const e = d?.entries?.find((x) => x.id === entryId);
   if (deliveryId && !e) return notFound('Eintrag');
+  if (store.invoiceOf(d)) {
+    return {
+      title: 'Eintrag',
+      back: `#/lieferschein/${d.id}`,
+      tab: 'lieferscheine',
+      html: `<p class="notice">Lieferschein ${esc(d.no)} ist abgerechnet (Rechnung ${esc(store.formatInvoiceNo(store.invoiceOf(d).no))}).
+        Einträge können nur nach einem Storno der Rechnung geändert werden.</p>`,
+    };
+  }
   let order = store.getOrder(d?.orderId || params.get('auftrag') || '');
   const date0 = d?.date || (isIsoDate(params.get('datum')) ? params.get('datum') : store.localDate());
   const perOf = (o) => store.getArticle(o?.articleId)?.perPallet || 0;
@@ -1720,7 +1742,7 @@ function viewEntryEdit(deliveryId, entryId, query) {
       });
       $('#del', root)?.addEventListener('click', () => {
         if (!confirm('Eintrag löschen?')) return;
-        store.removeDeliveryEntry(d.id, e.id);
+        try { store.removeDeliveryEntry(d.id, e.id); } catch (ex) { toast(ex.message, 'error'); return; }
         toast('Eintrag gelöscht');
         back(store.getDelivery(d.id) ? `#/lieferschein/${d.id}` : '#/lieferscheine');
       });
@@ -2397,8 +2419,20 @@ const isInstalled = () => matchMedia('(display-mode: standalone)').matches || na
 function viewMore() {
   return {
     title: 'Mehr',
-    back: '#/suche',
+    back: HOME,
     html: `
+      ${billing ? `${sectionTitle('Abrechnung')}
+      <ul class="card list">
+        ${row({ href: '#/umsatz', title: 'Umsatz', sub: 'Tage, Monate, je Artikel' })}
+        ${row({ href: '#/preise', title: 'Preise pro Satz', sub: 'je Artikel, mit „gültig ab“' })}
+        ${row({ href: '#/rechnungen', title: 'Rechnungen', sub: 'erstellen, Archiv, Storno' })}
+      </ul>
+      ${sectionTitle('Konfektionierung')}
+      <ul class="card list">
+        ${row({ href: '#/suche', title: 'Suche', sub: 'Auftrag, Artikel, Material' })}
+        ${row({ href: '#/material', title: 'Materialien' })}
+        ${row({ href: '#/bestellliste', title: 'Bestellliste' })}
+      </ul>` : ''}
       ${sectionTitle('Datenbestand')}
       <div class="card stats">
         <a href="#/auftraege"><b>${store.orders().length}</b><span>Aufträge</span></a>
@@ -2466,7 +2500,7 @@ function viewMore() {
       </div>`}
 
       <button type="button" class="btn btn-secondary btn-block" id="logout">${icon.logout}<span>Abmelden</span></button>
-      <p class="version">BO-WERT Konfektionierung · v${APP_VERSION}</p>`,
+      <p class="version">BO-WERT ${APP_NAME} · v${APP_VERSION}</p>`,
     mount(root) {
       $('#export', root).addEventListener('click', exportBackup);
       $('#ls-to-form', root).addEventListener('submit', (e) => {
@@ -2524,7 +2558,7 @@ function viewMore() {
 }
 
 async function exportBackup() {
-  const name = `konfektionierung-${new Date().toISOString().slice(0, 10)}.json`;
+  const name = `${IS_BILLING ? 'abrechnung' : 'konfektionierung'}-${new Date().toISOString().slice(0, 10)}.json`;
   const file = new File([store.exportJSON()], name, { type: 'application/json' });
   try {
     const how = await shareOrDownload(file, { title: 'Konfektionierung – Sicherung' });
@@ -2537,6 +2571,13 @@ async function exportBackup() {
 // ======================================================================
 // Start
 // ======================================================================
+
+if (billing) {
+  routes.unshift(...billing.billingRoutes({
+    icon, fmtN, fmtDay, dayLabel, isIsoDate, sectionTitle, row, emptyBox, field, notFound,
+    replace, notePdf, shareOrDownload, currentView: () => currentView,
+  }, route, ID, Q));
+}
 
 for (const tab of $$('.tab')) tab.insertAdjacentHTML('afterbegin', icon[tab.dataset.icon]);
 $('#back').innerHTML = icon.back;
@@ -2581,7 +2622,7 @@ window.addEventListener('online', updateChrome);
 window.addEventListener('offline', updateChrome);
 
 history.scrollRestoration = 'manual';
-if (!location.hash) history.replaceState(null, '', '#/suche');
+if (!location.hash) history.replaceState(null, '', HOME);
 stack = [currentHash()];
 window.addEventListener('hashchange', onHashChange);
 
@@ -2594,6 +2635,7 @@ store.onError((ex) => {
 });
 
 store.watchAuth((user) => {
+  if (user && !store.isRightAccount(user)) { store.logout(); return; }
   if (user) {
     store.startSync();
     showScreen('app');
@@ -2606,7 +2648,8 @@ store.watchAuth((user) => {
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   const hadController = Boolean(navigator.serviceWorker.controller);
-  navigator.serviceWorker.register('./sw.js').catch((e) => console.warn('Service Worker:', e));
+  // Ein Service Worker für beide Apps (liegt im Hauptordner, gilt auch für /abrechnung/).
+  navigator.serviceWorker.register(new URL('../sw.js', import.meta.url)).catch((e) => console.warn('Service Worker:', e));
   // Neue Version aktiv → einmal neu laden, damit alle Dateien zusammenpassen.
   navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) location.reload(); });
 }

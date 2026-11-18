@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="de" data-mode="abrechnung">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="BO-WERT Abrechnung: Umsatz, Preise pro Satz und Rechnungen der Konfektionierung.">
+  <meta name="theme-color" content="#342e3b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Abrechnung">
+  <title>Abrechnung · BO-WERT</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="../icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="../icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="../css/app.css">
+  <script type="module" src="../js/app.js"></script>
+</head>
+<body>
+  <div id="splash" class="login"><div class="login-logo" aria-label="Lädt">BW</div></div>
+
+  <section id="login" class="login" hidden>
+    <form id="login-form" class="login-card" novalidate>
+      <div class="login-logo" aria-hidden="true">BW</div>
+      <p class="login-eyebrow">BO-WERT</p>
+      <h1>Abrechnung</h1>
+      <label for="pw">Passwort</label>
+      <input id="pw" class="input" type="password" autocomplete="current-password"
+        autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
+      <p id="login-msg" class="form-error" role="alert"></p>
+      <button class="btn btn-primary btn-block" type="submit">Anmelden</button>
+    </form>
+  </section>
+
+  <div id="app" hidden>
+    <header class="topbar">
+      <button id="back" class="icon-btn" type="button" aria-label="Zurück" hidden></button>
+      <span id="brand" class="brand-mark" aria-hidden="true">BW</span>
+      <h1 id="title">Abrechnung</h1>
+      <span id="sync" class="sync" role="status" hidden></span>
+      <div id="topbar-action" class="topbar-action"></div>
+    </header>
+
+    <main id="main"></main>
+
+    <nav class="tabbar" aria-label="Hauptnavigation">
+      <a class="tab" href="#/umsatz" data-tab="umsatz" data-icon="chart"><span>Umsatz</span></a>
+      <a class="tab" href="#/rechnungen" data-tab="rechnungen" data-icon="invoice"><span>Rechnungen</span></a>
+      <a class="tab" href="#/auftraege" data-tab="auftraege" data-icon="orders"><span>Aufträge</span></a>
+      <a class="tab" href="#/lieferscheine" data-tab="lieferscheine" data-icon="delivery"><span>Lieferscheine</span></a>
+      <a class="tab" href="#/artikel" data-tab="artikel" data-icon="article"><span>Artikel</span></a>
+    </nav>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <noscript><p style="padding:24px">Bitte JavaScript aktivieren.</p></noscript>
+</body>
+</html>
