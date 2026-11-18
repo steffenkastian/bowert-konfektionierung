@@ -11,7 +11,7 @@ service cloud.firestore {
 
     match /{collection}/{id} {
       allow read, write: if isTeam()
-        && collection in ['orders', 'articles', 'materials', 'orderlist', 'files', 'deliveries', 'settings'];
+        && collection in ['orders', 'articles', 'materials', 'orderlist', 'files', 'deliveries', 'settings', 'archive'];
     }
   }
 }

@@ -17,7 +17,7 @@ const TEAM_EMAIL = 'konfektionierung@bowert-gmbh.de';
 const ABSENDER_NAME = 'BO-WERT Konfektionierung';
 const MAX_EMPFAENGER = 5;
 const MAX_ANHANG_BYTES = 8 * 1024 * 1024;
-const MAX_ANHAENGE = 5;
+const MAX_ANHAENGE = 10;
 
 /** Verbindungstest aus der App (ohne Mailversand). */
 function doGet() {
@@ -42,7 +42,8 @@ function doPost(e) {
     const betreff = String(req.subject || '').slice(0, 200);
     if (!betreff) throw new Error('Kein Betreff.');
 
-    const anhaenge = (req.attachments || []).slice(0, MAX_ANHAENGE).map(function (a) {
+    if ((req.attachments || []).length > MAX_ANHAENGE) throw new Error('Zu viele Anhänge (max. ' + MAX_ANHAENGE + ').');
+    const anhaenge = (req.attachments || []).map(function (a) {
       const bytes = Utilities.base64Decode(String(a.data || ''));
       if (bytes.length > MAX_ANHANG_BYTES) throw new Error('Anhang zu groß: ' + a.name);
       return Utilities.newBlob(bytes, String(a.mimeType || 'application/octet-stream'), String(a.name || 'Anhang'));

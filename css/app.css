@@ -828,3 +828,9 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 36px;
 
 .mail-btns { grid-template-columns: 1fr 1fr; }
 .umlag .link-btn { font-size: inherit; }
+
+/* ---------- Versand & Archiv ---------- */
+.tag-ok { background: var(--st-fertig-bg); color: var(--st-fertig-ink); }
+.notice-soft { background: var(--warn-pale); color: var(--warn); }
+.versions .row { width: 100%; border: 0; background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.archive-label { margin: 0; color: #fff; font-weight: 700; font-size: 13px; text-align: center; }

@@ -14,7 +14,12 @@
 //   deliveries/{orderId}_{datum}  { orderId, date, entries: [{ id, at, qty, pallets }], no, … }
 //                   Fertige Paletten/Satz eines Auftrags an einem Tag. Mit Nummer (no) ist es ein
 //                   Lieferschein; Menge und Paletten ergeben sich immer aus den Einträgen.
-//   settings/lieferschein  { next }   nächste freie Lieferscheinnummer (JJJJ + laufende Nummer)
+//   settings/lieferschein  { next, to }   nächste freie Lieferscheinnummer (JJJJ + laufende Nummer),
+//                   Empfänger für den automatischen Versand
+//   archive/{deliveryId}_v{n}  { deliveryId, no, version, note, pdf: Bytes, sentTo, sentAt }
+//                   Genau das PDF, das verschickt/geteilt wurde, plus die eingefrorenen Daten (für die
+//                   Abrechnung). Wird nicht live abgeglichen, sondern bei Bedarf geladen.
+//                   Am Lieferschein: versions: [{ v, at, qty, pallets, sentTo }], snap = Daten der letzten Fassung
 //   files/{fileId}-{n}  { articleId, fileId, part, parts, data: Bytes }
 //                   Dateiinhalt in Stücken < 1 MB (Firestore-Grenze je Dokument). Wird nicht live
 //                   abgeglichen, sondern erst beim Öffnen geladen (danach im Offline-Cache).
@@ -507,8 +512,23 @@ export const entriesOf = (d) => [...(d?.entries || [])].sort((a, b) => (a.at || 
 export const deliveryQty = (d) => (d?.entries || []).reduce((sum, e) => sum + (Number(e.qty) || 0), 0);
 export const deliveryPallets = (d) => (d?.entries || []).reduce((sum, e) => sum + (Number(e.pallets) || 0), 0);
 /** Lieferschein schon erstellt, danach aber Menge/Paletten geändert → neu verschicken. */
-export const deliveryChanged = (d) => Boolean(d?.no)
-  && (d.printedQty !== deliveryQty(d) || d.printedPallets !== deliveryPallets(d));
+/** Zuletzt verschickte Fassung. Lieferscheine aus v3.0/3.1 (vor dem Archiv) haben nur printedQty. */
+export function lastSent(d) {
+  const v = d?.versions;
+  if (v?.length) return [...v].sort((a, b) => a.v - b.v)[v.length - 1];
+  return d?.printedQty != null ? { v: 0, qty: d.printedQty, pallets: d.printedPallets, legacy: true } : null;
+}
+/** Verschickt, danach aber Menge/Paletten geändert → korrigierte Fassung senden. */
+export const deliveryChanged = (d) => {
+  const l = d?.no && lastSent(d);
+  return Boolean(l) && (l.qty !== deliveryQty(d) || l.pallets !== deliveryPallets(d));
+};
+/** offen (ohne Nummer) | erstellt (noch nicht verschickt) | geaendert | verschickt */
+export function deliveryState(d) {
+  if (!d?.no) return 'offen';
+  if (!lastSent(d)) return 'erstellt';
+  return deliveryChanged(d) ? 'geaendert' : 'verschickt';
+}
 const byDateNo = (a, b) => a.date.localeCompare(b.date) || String(a.no || '').localeCompare(String(b.no || ''));
 export const deliveriesOfOrder = (orderId) => deliveries().filter((d) => d.orderId === orderId).sort(byDateNo);
 export const deliveriesOn = (date) => deliveries().filter((d) => d.date === date);
@@ -607,6 +627,8 @@ export function removeDeliveryEntry(deliveryId, entryId) {
 }
 
 export function deleteDelivery(id) {
+  const d = data.deliveries.get(id);
+  for (const v of d?.versions || []) run(deleteDoc(doc(db, 'archive', `${id}_v${v.v}`)));
   run(deleteDoc(doc(db, 'deliveries', id)));
   data.deliveries.delete(id);
   emit();
@@ -651,7 +673,6 @@ export async function createDeliveryNotes(ids) {
       const a = getArticle(o?.articleId);
       const fields = {
         no: String(next), createdAt: now(), createdOn: localDate(), updatedAt: now(),
-        printedQty: deliveryQty(d), printedPallets: deliveryPallets(d),
         orderNr: o?.nr || d.orderNr || '', bestellnr: o?.bestellnr || '', text: lsTextOf(a), menge: o?.menge || null,
       };
       tx.update(snap.ref, fields);
@@ -666,8 +687,12 @@ export async function createDeliveryNotes(ids) {
   return created;
 }
 
-/** Daten für das PDF – aktuelle Auftrags-/Artikeldaten, sonst die beim Erstellen gemerkten. */
+/**
+ * Daten für das PDF. Ist die Fassung schon verschickt und unverändert, gelten die eingefrorenen Daten
+ * (snap) – so entsteht später exakt derselbe Lieferschein. Sonst aktuelle Auftrags-/Artikeldaten.
+ */
 export function noteData(d) {
+  if (d.snap && !deliveryChanged(d) && d.snap.qty === deliveryQty(d)) return { ...d.snap, id: d.id };
   const o = getOrder(d.orderId);
   const a = getArticle(o?.articleId);
   return {
@@ -685,19 +710,58 @@ export function noteData(d) {
   };
 }
 
-/** Nach dem Teilen/Drucken: aktuellen Stand als „verschickt“ merken. */
-export function markPrinted(ids) {
+/**
+ * Verschickte/geteilte Fassung archivieren: genau dieses PDF + eingefrorene Daten.
+ * notes: [{ id, note, pdf: Uint8Array }], sentTo: Empfänger oder '' (geteilt/gedruckt).
+ */
+export function archiveNotes(notes, sentTo = '', { replaceVersions = false, legacy = false } = {}) {
   const batch = writeBatch(db);
-  let any = false;
-  for (const id of ids) {
+  for (const { id, note, pdf } of notes) {
     const d = data.deliveries.get(id);
-    if (!d?.no || !deliveryChanged(d)) continue;
-    const fields = { printedQty: deliveryQty(d), printedPallets: deliveryPallets(d) };
-    batch.update(doc(db, 'deliveries', id), fields);
-    Object.assign(d, fields);
-    any = true;
+    if (!d?.no) continue;
+    const versions = replaceVersions ? [] : [...(d.versions || [])];
+    const v = (versions.reduce((m, x) => Math.max(m, x.v), 0)) + 1;
+    const meta = { v, at: now(), qty: note.qty, pallets: note.pallets, sentTo: str(sentTo), ...(legacy ? { legacy: true } : {}) };
+    const frozen = { ...note };
+    delete frozen.id;
+    batch.set(doc(db, 'archive', `${id}_v${v}`), {
+      deliveryId: id, no: d.no, version: v, note: frozen, pdf: Bytes.fromUint8Array(pdf), sentTo: str(sentTo), sentAt: now(),
+    });
+    const all = [...versions, meta];
+    batch.update(doc(db, 'deliveries', id), { versions: all, snap: frozen, updatedAt: now() });
+    Object.assign(d, { versions: all, snap: frozen });
   }
-  if (any) { run(batch.commit()); emit(); }
+  run(batch.commit());
+  emit();
+}
+
+/** Archiviertes PDF einer Fassung laden. */
+export async function loadArchivedPdf(deliveryId, v) {
+  const ref = doc(db, 'archive', `${deliveryId}_v${v}`);
+  let snap = await getDocFromCache(ref).catch(() => null);
+  if (!snap?.exists()) snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error('Archivierte Fassung nicht gefunden.');
+  return snap.data().pdf.toUint8Array();
+}
+
+/** Lieferscheine aus der Zeit vor dem Archiv (nur printedQty, unverändert) → einmalig archivieren. */
+export const legacyToArchive = () => deliveries()
+  .filter((d) => d.no && !d.versions?.length && d.printedQty != null && !deliveryChanged(d));
+
+export const lsMailTo = () => data.settings.get('lieferschein')?.to || '';
+export function setLsMailTo(to) {
+  const list = parseRecipients(to);
+  run(setDoc(doc(db, 'settings', 'lieferschein'), { to: list, updatedAt: now() }, { merge: true }));
+  data.settings.set('lieferschein', { ...data.settings.get('lieferschein'), id: 'lieferschein', to: list });
+  emit();
+}
+
+function parseRecipients(to) {
+  const list = str(to).split(/[,;\s]+/).filter(Boolean);
+  const bad = list.find((a) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a));
+  if (bad) throw new Error(`Bitte eine gültige E-Mail-Adresse eingeben („${bad}“).`);
+  if (list.length > 5) throw new Error('Höchstens 5 Empfänger.');
+  return list.join(', ');
 }
 
 // ---------- Umlagerungsschein ----------
@@ -718,11 +782,7 @@ export function saveUmlagerungTemplate(bytes, name) {
 }
 
 export function setUmlagerungMail(to) {
-  const list = str(to).split(/[,;\s]+/).filter(Boolean);
-  const bad = list.find((a) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a));
-  if (bad) throw new Error(`Bitte eine gültige E-Mail-Adresse eingeben („${bad}“).`);
-  if (list.length > 5) throw new Error('Höchstens 5 Empfänger.');
-  to = list.join(', ');
+  to = parseRecipients(to);
   run(setDoc(doc(db, 'settings', 'umlagerung'), { to, updatedAt: now() }, { merge: true }));
   data.settings.set('umlagerung', { ...umlagerungSettings(), id: 'umlagerung', to });
   emit();

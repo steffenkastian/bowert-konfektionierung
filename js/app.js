@@ -9,7 +9,7 @@ import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 import { deliveryPdf } from './lieferschein.js';
 import { fillUmlagerung, readTemplate, loadFflate, digits } from './umlagerung.js';
 
-const APP_VERSION = '3.2.0';
+const APP_VERSION = '3.3.0';
 const PREFS_KEY = 'konf.ui';
 const LIST_LIMIT = 40;
 const CODE_ATTRS = 'autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false"';
@@ -1268,7 +1268,7 @@ function palletBox(o) {
     ${!per && a ? `<p class="hint">Für „1 Palette“ beim Artikel <a href="#/artikel/${a.id}/bearbeiten">Satz pro Palette eintragen</a>.</p>` : ''}
     ${today ? `<a class="today-line" href="#/lieferschein/${today.id}">
         <span><b>Heute:</b> ${palLabel(store.deliveryPallets(today))} · ${fmtN(store.deliveryQty(today))} Satz</span>
-        <span class="today-ls">${today.no ? `Lieferschein ${esc(today.no)}${store.deliveryChanged(today) ? ' · geändert' : ''}` : 'noch ohne Lieferschein'}</span>${icon.chevron}</a>` : ''}
+        <span class="today-ls">${today.no ? `Lieferschein ${esc(today.no)} · ${STATE_TEXT[store.deliveryState(today)]}` : 'noch ohne Lieferschein'}</span>${icon.chevron}</a>` : ''}
   </section>`;
 }
 
@@ -1298,8 +1298,7 @@ function deliveryRow(d, { showDate = false } = {}) {
     href: `#/lieferschein/${d.id}`,
     title: d.no ? `Nr. ${esc(d.no)}` : `Auftrag ${esc(nr)}`,
     sub: esc(sub),
-    tag: store.deliveryChanged(d) ? '<span class="tag tag-warn">geändert</span>'
-      : d.no ? '' : '<span class="tag">ohne Lieferschein</span>',
+    tag: STATE_TAG[store.deliveryState(d)],
   });
 }
 
@@ -1339,7 +1338,9 @@ async function sharePdf(list) {
     } else {
       downloadFile(file);
     }
-    store.markPrinted(list.map((d) => d.id));
+    // Geteilte/gedruckte Fassung archivieren (nur was noch nicht in dieser Fassung verschickt war)
+    const fresh = list.filter((d) => ['erstellt', 'geaendert'].includes(store.deliveryState(d)));
+    if (fresh.length) store.archiveNotes(await Promise.all(fresh.map(notePdf)), '');
   } catch (ex) {
     if (ex.name === 'AbortError') return;
     if (ex.name === 'NotAllowedError') { toast('PDF ist fertig – bitte noch einmal tippen.'); return; }
@@ -1348,12 +1349,89 @@ async function sharePdf(list) {
   }
 }
 
+// ---------- Versand per Mail + Archiv ----------
+
+const STATE_TEXT = { offen: 'ohne Lieferschein', erstellt: 'nicht verschickt', geaendert: 'geändert', verschickt: 'verschickt' };
+const STATE_TAG = {
+  offen: '<span class="tag">ohne Lieferschein</span>',
+  erstellt: '<span class="tag">nicht verschickt</span>',
+  geaendert: '<span class="tag tag-warn">geändert</span>',
+  verschickt: '<span class="tag tag-ok">verschickt</span>',
+};
+const canAutoSend = () => Boolean(store.mailService() && store.lsMailTo());
+const MAX_FILES_PER_MAIL = 5; // so wie im Apps Script (mail/Code.gs)
+
+/** Einzel-PDF eines Lieferscheins (für Mail-Anhang und Archiv). */
+async function notePdf(d) {
+  const note = store.noteData(d);
+  const bytes = new Uint8Array(await (await deliveryPdf([note])).arrayBuffer());
+  return { id: d.id, note, pdf: bytes, file: new File([bytes], `Lieferschein_${note.no}.pdf`, { type: 'application/pdf' }) };
+}
+
+/** Lieferscheine per Mail verschicken (je Lieferschein ein PDF-Anhang) und die Fassung archivieren. */
+async function sendNotes(list, btn) {
+  const to = store.lsMailTo();
+  if (!canAutoSend()) {
+    toast('Für den Versand unter ⚙ Mehr den Mailversand und die Empfänger für Lieferscheine eintragen.', 'error');
+    return false;
+  }
+  list = list.filter((d) => d.no).sort((a, b) => String(a.no).localeCompare(String(b.no)));
+  if (!list.length) return false;
+  const label = btn?.innerHTML;
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner small"></span><span>Wird verschickt …</span>'; }
+  let sent = 0;
+  try {
+    const items = [];
+    for (const d of list) items.push({ ...await notePdf(d), corrected: store.deliveryState(d) === 'geaendert' });
+    const parts = Math.ceil(items.length / MAX_FILES_PER_MAIL);
+    for (let i = 0; i < items.length; i += MAX_FILES_PER_MAIL) {
+      const chunk = items.slice(i, i + MAX_FILES_PER_MAIL);
+      const corrected = chunk.some((x) => x.corrected);
+      const first = chunk[0].note.no;
+      const last = chunk[chunk.length - 1].note.no;
+      const subject = `${chunk.length === 1 ? `Lieferschein ${first}` : `Lieferscheine ${first}–${last}`} BO-WERT`
+        + `${corrected ? ' (korrigiert)' : ''}${parts > 1 ? ` (${i / MAX_FILES_PER_MAIL + 1}/${parts})` : ''}`;
+      const body = `Hallo zusammen,\n\nim Anhang ${chunk.length === 1 ? 'befindet sich der Lieferschein' : 'befinden sich die Lieferscheine'}`
+        + `${corrected ? ' (korrigierte Fassung)' : ''}:\n\n`
+        + chunk.map((x) => `Lieferschein ${x.note.no} · Auftrag ${x.note.orderNr} · ${x.note.qty} Stück · ${x.note.pallets} Pal.${x.corrected ? ' · korrigiert' : ''}`).join('\n')
+        + '\n\nViele Grüße\ndas BO-WERT Konfektionierungsteam';
+      await callMailService({ to, subject, body, files: chunk.map((x) => x.file) });
+      store.archiveNotes(chunk, to);
+      sent += chunk.length;
+    }
+    toast(`${plural(sent, 'Lieferschein', 'Lieferscheine')} verschickt an ${to}`);
+    return true;
+  } catch (ex) {
+    console.error(ex);
+    toast(`Versand fehlgeschlagen${sent ? ` nach ${sent} Lieferscheinen` : ''}: ${ex.message}`, 'error');
+    return false;
+  } finally {
+    if (btn?.isConnected) { btn.disabled = false; btn.innerHTML = label; }
+  }
+}
+
+/** Lieferscheine von vor dem Archiv (v3.0/3.1) einmalig mit ihrem PDF archivieren. */
+let legacyArchiving = false;
+async function archiveLegacy() {
+  if (legacyArchiving || !store.isReady() || !navigator.onLine) return;
+  const list = store.legacyToArchive();
+  if (!list.length) return;
+  legacyArchiving = true;
+  try {
+    store.archiveNotes(await Promise.all(list.map(notePdf)), '', { legacy: true });
+  } catch (ex) {
+    console.error('Archivieren alter Lieferscheine:', ex);
+    legacyArchiving = false;
+  }
+}
+
 async function createNotes(ids, btn) {
   if (!ids.length) return;
   const label = btn?.innerHTML;
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner small"></span><span>Wird erstellt …</span>'; }
+  let created = [];
   try {
-    const created = await store.createDeliveryNotes(ids);
+    created = await store.createDeliveryNotes(ids);
     if (!created.length) { toast('Nichts zu erstellen.'); return; }
     const nos = created.map((c) => c.no);
     toast(nos.length === 1 ? `Lieferschein ${nos[0]} erstellt` : `Lieferscheine ${nos[0]}–${nos[nos.length - 1]} erstellt`);
@@ -1363,6 +1441,8 @@ async function createNotes(ids, btn) {
   } finally {
     if (btn?.isConnected) { btn.disabled = false; btn.innerHTML = label; }
   }
+  // Automatisch verschicken, wenn Mailversand + Empfänger eingerichtet sind
+  if (created.length && canAutoSend()) await sendNotes(created.map((c) => store.getDelivery(c.id)).filter(Boolean), btn);
 }
 
 // ---------- Tagesübersicht ----------
@@ -1394,6 +1474,7 @@ function viewDeliveries(query) {
         const all = store.deliveriesOn(date).filter((d) => d.no || store.deliveryQty(d));
         const open = all.filter((d) => !d.no).sort((a, b) => natCmp(a.orderNr || '', b.orderNr || ''));
         const done = all.filter((d) => d.no).sort((a, b) => String(a.no).localeCompare(String(b.no)));
+        const unsent = done.filter((d) => ['erstellt', 'geaendert'].includes(store.deliveryState(d)));
         const qty = all.reduce((s, d) => s + store.deliveryQty(d), 0);
         const pallets = all.reduce((s, d) => s + store.deliveryPallets(d), 0);
         const add = `<a class="btn btn-secondary btn-block" href="#/eintrag/neu?datum=${date}">${icon.plus}<span>Palette / Satz ${date === today ? 'eintragen' : `für den ${fmtDay(date)} nachtragen`}</span></a>`;
@@ -1404,14 +1485,18 @@ function viewDeliveries(query) {
           : `<div class="card day-sum"><b>${palLabel(pallets)}</b><span>${fmtN(qty)} Satz · ${plural(all.length, 'Auftrag', 'Aufträge')}</span></div>
             ${open.length ? `${sectionTitle('Noch ohne Lieferschein', open.length)}
               <ul class="card list">${open.map((d) => deliveryRow(d)).join('')}</ul>
-              <button type="button" class="btn btn-primary btn-block" id="create-all">${icon.check}<span>${open.length === 1 ? 'Lieferschein erstellen' : `${open.length} Lieferscheine erstellen`}</span></button>` : ''}
+              <button type="button" class="btn btn-primary btn-block" id="create-all">${icon.check}<span>${open.length === 1 ? 'Lieferschein erstellen' : `${open.length} Lieferscheine erstellen`}${canAutoSend() ? ' & senden' : ''}</span></button>` : ''}
             ${done.length ? `${sectionTitle('Lieferscheine', done.length)}
               <ul class="card list">${done.map((d) => deliveryRow(d)).join('')}</ul>
-              <button type="button" class="btn ${open.length ? 'btn-secondary' : 'btn-primary'} btn-block" id="share-all">${icon.share}<span>${done.length === 1 ? 'PDF teilen / drucken' : `PDF mit allen ${done.length} teilen / drucken`}</span></button>` : ''}
+              ${unsent.length && canAutoSend() ? `<button type="button" class="btn ${open.length ? 'btn-secondary' : 'btn-primary'} btn-block" id="send-all">${icon.send}<span>${unsent.length === 1 ? 'Lieferschein senden' : `${unsent.length} Lieferscheine senden`}</span></button>` : ''}
+              <button type="button" class="btn ${open.length || (unsent.length && canAutoSend()) ? 'btn-secondary' : 'btn-primary'} btn-block" id="share-all">${icon.share}<span>${done.length === 1 ? 'PDF teilen / drucken' : `PDF mit allen ${done.length} teilen / drucken`}</span></button>
+              ${canAutoSend() ? `<p class="hint center">Versand an ${esc(store.lsMailTo())}</p>`
+                : '<p class="hint center">Automatisch verschicken: unter ⚙ Mehr Mailversand und Empfänger für Lieferscheine eintragen.</p>'}` : ''}
             ${add}
             <a class="btn btn-secondary btn-block" href="#/lieferscheine/alle">Alle Lieferscheine</a>`;
         $('#create-all', root)?.addEventListener('click', (e) => createNotes(open.map((d) => d.id), e.currentTarget));
         $('#share-all', root)?.addEventListener('click', () => sharePdf(done));
+        $('#send-all', root)?.addEventListener('click', (e) => sendNotes(unsent, e.currentTarget));
         if (done.length) pdfFile(done).catch(() => {});
       };
       draw();
@@ -1431,7 +1516,9 @@ function viewDelivery(id) {
   const a = store.getArticle(o?.articleId);
   const n = store.noteData(d);
   const entries = store.entriesOf(d);
-  const changed = store.deliveryChanged(d);
+  const st = store.deliveryState(d);
+  const sentV = store.lastSent(d);
+  const versions = [...(d.versions || [])].sort((x, y) => y.v - x.v);
   const kv = (k, v) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`;
   const view = {
     title: d.no ? 'Lieferschein' : 'Lieferung',
@@ -1443,7 +1530,8 @@ function viewDelivery(id) {
         <div class="detail-title">${d.no ? `Nr. ${esc(d.no)}` : nrHtml(n.orderNr.replace(store.ORDER_PREFIX, ''))}</div>
         <div class="detail-sub">${esc(dayLabel(d.date))}</div>
       </div>
-      ${changed ? `<p class="notice">Seit dem Erstellen geändert (vorher ${fmtN(d.printedQty)} Satz / ${palLabel(d.printedPallets)}) – bitte neu verschicken.</p>` : ''}
+      ${st === 'geaendert' ? `<p class="notice">Nach dem Versand geändert (verschickt: ${fmtN(sentV.qty)} Satz / ${palLabel(sentV.pallets)}) – bitte die korrigierte Fassung senden.</p>` : ''}
+      ${st === 'erstellt' ? '<p class="notice notice-soft">Noch nicht verschickt.</p>' : ''}
       <div class="card kvs">
         ${kv('Auftrag', o ? `<a href="#/auftrag/${o.id}">${esc(n.orderNr)}</a>` : esc(n.orderNr))}
         ${kv('Bestellnummer', n.bestellnr ? esc(n.bestellnr)
@@ -1454,11 +1542,18 @@ function viewDelivery(id) {
         ${kv('Liefermenge', `${fmtN(n.prev)} + ${fmtN(n.qty)} = <b>${fmtN(n.prev + n.qty)}</b>${n.total ? ` von ${fmtN(n.total)}` : ''}`)}
         ${d.no ? kv('Erstellt', fmtDay(d.createdOn)) : ''}
       </div>
-      ${d.no ? `<button type="button" class="btn btn-primary btn-block" id="share">${icon.share}<span>PDF teilen / drucken</span></button>`
+      ${d.no && canAutoSend() && st !== 'verschickt' ? `<button type="button" class="btn btn-primary btn-block" id="send">${icon.send}<span>${st === 'geaendert' ? 'Korrigierte Fassung senden' : 'Senden'}</span></button>
+           <p class="hint center">an ${esc(store.lsMailTo())}</p>` : ''}
+      ${d.no ? `<button type="button" class="btn ${canAutoSend() && st !== 'verschickt' ? 'btn-secondary' : 'btn-primary'} btn-block" id="share">${icon.share}<span>PDF teilen / drucken</span></button>`
         : `<button type="button" class="btn btn-primary btn-block" id="create" ${n.qty ? '' : 'disabled'}>${icon.check}<span>Lieferschein erstellen</span></button>
            <p class="hint center">Die Nummer (nächste: ${store.nextDeliveryNo()}) wird beim Erstellen vergeben.</p>`}
       <button type="button" class="btn btn-secondary btn-block" id="preview">${previewFor === d.id ? 'Vorschau schließen' : 'Vorschau'}</button>
       <div id="pdf-box" class="file-view is-pdf" ${previewFor === d.id ? '' : 'hidden'}></div>
+      ${versions.length ? `${sectionTitle('Verschickt / archiviert', versions.length)}
+        <ul class="card list versions">${versions.map((v) => `<li><button type="button" class="row" data-version="${v.v}">
+          <span class="row-main"><span class="row-title">Fassung ${v.v} · ${fmtN(v.qty)} Satz · ${palLabel(v.pallets)}</span>
+          <span class="row-sub">${esc(new Date(v.at).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }))} · ${esc(v.sentTo ? `an ${v.sentTo}` : v.legacy ? 'nachträglich archiviert' : 'geteilt / gedruckt')}</span></span>
+          <span class="tag tag-ok">PDF</span></button></li>`).join('')}</ul>` : ''}
       ${sectionTitle('Einträge', entries.length)}
       ${entries.length ? `<ul class="card list">${entries.map((e) => row({
         href: `#/eintrag/${d.id}/${e.id}`,
@@ -1489,11 +1584,31 @@ function viewDelivery(id) {
         if (previewFor === d.id) showPreview();
       });
       $('#share', root)?.addEventListener('click', () => sharePdf([d]));
+      $('#send', root)?.addEventListener('click', (e) => sendNotes([d], e.currentTarget));
+      // Archivierte Fassung genau so anzeigen, wie sie verschickt wurde
+      $('.versions', root)?.addEventListener('click', async (e) => {
+        const b = e.target.closest('[data-version]');
+        if (!b) return;
+        previewFor = d.id;
+        box.hidden = false;
+        $('#preview', root).textContent = 'Vorschau schließen';
+        box.innerHTML = '<div class="loading"><span class="spinner"></span>Archiv wird geladen …</div>';
+        box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        try {
+          const bytes = await store.loadArchivedPdf(d.id, Number(b.dataset.version));
+          if (currentView !== view) return;
+          box.innerHTML = `<p class="archive-label">Archiv: Fassung ${b.dataset.version}</p>`;
+          await renderPdf(new Blob([bytes], { type: 'application/pdf' }), box, () => currentView === view);
+        } catch (ex) {
+          box.innerHTML = `<p class="empty-inline pad">${esc(ex.message)}</p>`;
+        }
+      });
       $('#create', root)?.addEventListener('click', (e) => createNotes([d.id], e.currentTarget));
       if (d.no) pdfFile([d]).catch(() => {});
       $('#del', root).addEventListener('click', () => {
         const what = d.no ? `Lieferschein ${d.no}` : 'diese Lieferung';
-        if (!confirm(`${what} mit allen Einträgen löschen?${d.no ? '\n\nDie Nummer wird nicht neu vergeben.' : ''}`)) return;
+        const sentNote = d.versions?.length ? '\n\nACHTUNG: Er wurde bereits verschickt – das Archiv wird mit gelöscht.' : '';
+        if (!confirm(`${what} mit allen Einträgen löschen?${d.no ? '\n\nDie Nummer wird nicht neu vergeben.' : ''}${sentNote}`)) return;
         store.deleteDelivery(d.id);
         toast(d.no ? `Lieferschein ${d.no} gelöscht` : 'Lieferung gelöscht');
         back(view.back);
@@ -2293,6 +2408,13 @@ function viewMore() {
           <button class="btn btn-secondary" type="submit">Speichern</button></div></div>
         <p class="form-error" id="ls-err" role="alert"></p>
       </form>
+      <form class="card box" id="ls-to-form" novalidate>
+        <div class="field" style="margin-top:12px"><label for="ls-to">Automatisch senden an <span class="opt">optional</span></label>
+          <div class="input-row"><input id="ls-to" class="input" type="email" inputmode="email" autocomplete="off" value="${esc(store.lsMailTo())}" placeholder="name@firma.de, …">
+          <button class="btn btn-secondary" type="submit">Speichern</button></div>
+          <p class="hint">Beim Erstellen gehen die Lieferscheine automatisch per Mail an diese Adressen (je Lieferschein ein PDF, über den Mailversand). Mehrere mit Komma trennen. Leer = nicht automatisch.</p></div>
+        <p class="form-error" id="ls-to-err" role="alert"></p>
+      </form>
 
       ${sectionTitle('Umlagerungsschein')}
       <form class="card box" id="umlag-form" novalidate>
@@ -2341,6 +2463,14 @@ function viewMore() {
       <p class="version">BO-WERT Konfektionierung · v${APP_VERSION}</p>`,
     mount(root) {
       $('#export', root).addEventListener('click', exportBackup);
+      $('#ls-to-form', root).addEventListener('submit', (e) => {
+        e.preventDefault();
+        try {
+          store.setLsMailTo($('#ls-to', root).value);
+          $('#ls-to-err', root).textContent = '';
+          toast(store.lsMailTo() ? 'Lieferscheine werden ab jetzt automatisch verschickt' : 'Automatischer Versand ausgeschaltet');
+        } catch (ex) { $('#ls-to-err', root).textContent = ex.message; }
+      });
       $('#mail-form', root).addEventListener('submit', (e) => {
         e.preventDefault();
         try {
@@ -2458,6 +2588,7 @@ stack = [currentHash()];
 window.addEventListener('hashchange', onHashChange);
 
 store.onChange(scheduleRefresh);
+store.onChange(() => { archiveLegacy(); });
 store.onError((ex) => {
   console.error(ex);
   if (ex.code === 'permission-denied') toast('Keine Berechtigung – bitte neu anmelden.', 'error');

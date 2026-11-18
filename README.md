@@ -25,7 +25,7 @@ Ein Material (Artikelnummer) wird nur einmal gepflegt. Ändert sich sein Lageror
 | **Suche** (Start) | Auftragsnummer, Artikelbezeichnung, Artikelnummer oder Lagerort eintippen. „202878“ findet auch „630-202878X“. **123** schaltet auf die Zahlentastatur. |
 | **Aufträge** | Status je Auftrag: **Nicht begonnen · Als nächstes · In Arbeit · Abgeschlossen** (auf der Auftragsseite mit einem Tipp umschalten, Liste danach filtern, „In Arbeit“ und „Als nächstes“ stehen auch auf der Startseite). **Als nächstes** wird an einen laufenden Auftrag gekoppelt: Am laufenden Auftrag den nächsten wählen (oder neu anlegen) – dort steht dann „Als nächstes: …“ mit **Starten**-Knopf, in Listen „→ danach …“. Beim Abschließen bietet die App an, den nächsten direkt zu starten. Auftrag anlegen und Artikelbezeichnung zuordnen – beim Tippen („5“) werden passende Artikel vorgeschlagen, inkl. Vorschau der Materialien. Unbekannte Bezeichnungen werden neu angelegt. |
 | **Fertig melden** | Auf der Auftragsseite **1 Palette** (= Satz pro Palette des Artikels) oder **Andere Menge** (Satz + Paletten, auch für frühere Tage). Fortschritt „x von y Satz“ steht am Auftrag und in der Auftragsliste. |
-| **Lieferscheine** | Tagesübersicht (mit ‹ › frühere Tage): pro Auftrag ein Lieferschein mit der Tagessumme. **Lieferscheine erstellen** vergibt fortlaufende Nummern (JJJJ + laufende Nummer, im neuen Jahr ab JJJJ0001; nächste Nummer unter ⚙ änderbar). **PDF teilen / drucken** erzeugt alle Lieferscheine des Tages als eine PDF im Layout der alten Word-Vorlage. Wird danach noch etwas geändert, ist der Lieferschein als „geändert“ markiert und kann mit derselben Nummer neu verschickt werden. **Alle Lieferscheine**: Liste mit Filter und Export als Tabelle (CSV). |
+| **Lieferscheine** | Tagesübersicht (mit ‹ › frühere Tage): pro Auftrag ein Lieferschein mit der Tagessumme. **Lieferscheine erstellen** vergibt fortlaufende Nummern (JJJJ + laufende Nummer, im neuen Jahr ab JJJJ0001; nächste Nummer unter ⚙ änderbar). **PDF teilen / drucken** erzeugt alle Lieferscheine des Tages als eine PDF im Layout der alten Word-Vorlage. Sind unter ⚙ Mailversand und „Automatisch senden an“ eingetragen, gehen neue Lieferscheine beim Erstellen **automatisch per Mail** raus (je Lieferschein ein PDF, max. 5 pro Mail). Status je Schein: *nicht verschickt · verschickt · geändert* (geänderte als „korrigierte Fassung“ neu senden). Wird danach noch etwas geändert, ist der Lieferschein als „geändert“ markiert und kann mit derselben Nummer neu verschickt werden. **Alle Lieferscheine**: Liste mit Filter und Export als Tabelle (CSV). |
 | **Artikel** | Umschalter **Artikel / Material** oben. Satz pro Palette und Text auf dem Lieferschein (leer = „Konfektionierung - Artikelbezeichnung“). Materialien per Artikelnummer zuordnen. Bekannte Nummern füllen Beschreibung und Lagerort automatisch aus. **Packhinweise:** Foto (direkt mit der Kamera) oder PDF hochladen – erscheint bei jedem Auftrag mit diesem Artikel. Antippen zeigt Foto bzw. alle PDF-Seiten in der App; umbenennen, teilen, löschen. |
 | **Bestellliste** | Überall, wo ein Lagerort steht, gibt es **Entnehmen** → das Material landet hier (mehrfach tippen = Menge +1). Menge anpassen, als *bestellt* markieren, bei Eintreffen abhaken, Liste per WhatsApp/Mail **teilen**. **Umlagerungsschein:** füllt die Excel-Vorlage aus (Menge = Anzahl Paletten in Spalte A bei der passenden Teile-Nr.; unbekannte Teile-Nr. werden unten angehängt) – **Per Mail senden** (iPhone: Teilen-Menü; Android/Computer: Excel wird gespeichert und die Mail-App mit Empfänger + Betreff geöffnet – Datei dort anhängen) oder als Excel speichern, danach optional alles als bestellt markieren. |
 | ⚙ **Mehr** | Nächste Lieferscheinnummer, Umlagerungsschein-Vorlage (.xlsx) hochladen/ersetzen + Mail-Empfänger, Datenbestand, Sicherungskopie (JSON), Anleitung „Als App installieren“, Abmelden. |
@@ -68,7 +68,7 @@ firestore.rules        Zugriffsregeln der Datenbank
 ```
 
 **Neue Version veröffentlichen:** committen und pushen, vorher in `sw.js` die Konstante `CACHE` hochzählen
-(z. B. `konf-v10`), damit installierte Apps die neuen Dateien laden.
+(z. B. `konf-v11`), damit installierte Apps die neuen Dateien laden.
 **Regeln ändern:** `firebase deploy --only firestore`.
 
 **Kostenlos-Grenzen (Spark):** 50.000 Lesevorgänge und 20.000 Schreibvorgänge pro Tag, 1 GB Speicher,
@@ -93,10 +93,16 @@ Neue Version* (die URL bleibt gleich).
 
 ## Daten der Lieferscheine
 
+**Archiv (für die Abrechnung):** Jede verschickte, geteilte oder gedruckte Fassung wird **genau so gespeichert, wie
+sie rausging** – als PDF plus eingefrorene Daten (Nummer, Auftrag, Bestellnummer, Text, Mengen, „bisher geliefert“).
+Spätere Änderungen an Artikeln oder Aufträgen ändern einen verschickten Lieferschein nicht mehr. Wird nachträglich
+korrigiert, entsteht Fassung 2, 3 … (alle bleiben im Archiv). Für Rechnungen werden die archivierten PDFs angehängt.
+
 - `deliveries/{Auftrag}_{Datum}`: Einträge (Satz, Paletten, Zeit) eines Auftrags an einem Tag; mit Nummer = Lieferschein.
   Menge und Paletten ergeben sich immer aus den Einträgen. „Gesamtliefermenge bisher“ = Summe der Lieferscheine
   dieses Auftrags an früheren Tagen.
-- `settings/lieferschein`: nächste freie Nummer. Vergabe per Firestore-Transaktion (keine doppelten Nummern,
+- `archive/{Lieferschein}_v{n}`: archiviertes PDF (~25 KB) + eingefrorene Daten je Fassung; wird nur bei Bedarf geladen.
+- `settings/lieferschein`: nächste freie Nummer und Empfänger für den automatischen Versand. Vergabe per Firestore-Transaktion (keine doppelten Nummern,
   braucht Internetverbindung).
 - `settings/mail`: Web-App-URL des Mail-Skripts.
 - `settings/umlagerung`: Excel-Vorlage des Umlagerungsscheins (nicht im öffentlichen Repo, da Kundenformular)
