@@ -6,8 +6,9 @@ import {
   $, $$, esc, norm, natCmp, locCmp, matcher, plural, formatDate, toast, icon, attachSuggest,
 } from './ui.js';
 import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
+import { deliveryPdf } from './lieferschein.js';
 
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '3.0.0';
 const PREFS_KEY = 'konf.ui';
 const LIST_LIMIT = 40;
 const CODE_ATTRS = 'autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false"';
@@ -34,7 +35,7 @@ function rememberOrder(id) {
   savePrefs();
 }
 
-const state = { query: '', filter: { auftraege: '', artikel: '', material: '' } };
+const state = { query: '', filter: { auftraege: '', artikel: '', material: '', lieferscheine: '' } };
 
 // ======================================================================
 // Anmeldung (Firebase Auth – das Passwort wird vom Server geprüft)
@@ -150,6 +151,11 @@ const routes = [
   [route('material/neu'), () => viewMaterial(null)],
   [route(`material/${ID}${Q}`), (id, q) => viewMaterial(id, q)],
   [route('bestellliste'), () => viewOrderList()],
+  [route(`lieferscheine/alle${Q}`), (q) => viewDeliveryList(q)],
+  [route(`lieferscheine${Q}`), (q) => viewDeliveries(q)],
+  [route(`lieferschein/${ID}`), (id) => viewDelivery(id)],
+  [route(`eintrag/neu${Q}`), (q) => viewEntryEdit(null, null, q)],
+  [route(`eintrag/${ID}/${ID}`), (did, eid) => viewEntryEdit(did, eid)],
   [route('mehr'), () => viewMore()],
 ];
 
@@ -368,7 +374,7 @@ function articleCard(a, { primary = false } = {}) {
 
 function orderRow(o) {
   const a = store.getArticle(o.articleId);
-  const sub = [a?.name, o.note].filter(Boolean).join(' · ');
+  const sub = [a?.name, o.note, progressShort(o)].filter(Boolean).join(' · ');
   const ref = nextRef(o);
   return row({
     href: `#/auftrag/${o.id}`,
@@ -532,14 +538,15 @@ function viewSearch() {
 function searchResults(q) {
   if (!q.trim()) return searchHome();
   const m = matcher(q);
-  const orders = rank(store.orders(), (o) => Math.max(m(o.nr) * 10, m(o.note)), (a, b) => natCmp(a.nr, b.nr));
+  const orders = rank(store.orders(), (o) => Math.max(m(o.nr) * 10, m(store.fullNr(o.nr)) * 10, m(o.bestellnr) * 5, m(o.note)),
+    (a, b) => natCmp(a.nr, b.nr));
   const arts = rank(store.articles(), (a) => m(a.name) * 10, (a, b) => natCmp(a.name, b.name));
   const mats = rank(store.materials(), (x) => Math.max(m(x.nr) * 10, m(x.description) * 2, m(x.location) * 2),
     (a, b) => locCmp(a.location, b.location));
 
   if (!orders.length && !arts.length && !mats.length) {
     return emptyBox('Nichts gefunden', `Kein Auftrag, Artikel oder Material passt zu „${esc(q.trim())}“.`,
-      `<a class="btn btn-primary" href="#/auftrag/neu?nr=${encodeURIComponent(q.trim())}">${icon.plus}
+      `<a class="btn btn-primary" href="#/auftrag/neu?nr=${encodeURIComponent(store.shortNr(q.trim()))}">${icon.plus}
         <span>Auftrag „${esc(q.trim())}“ anlegen</span></a>`);
   }
 
@@ -600,7 +607,16 @@ function searchHome() {
     noMaterial && row({ href: '#/artikel?offen=1', title: esc(`${plural(noMaterial, 'Artikel', 'Artikel')} ohne Material`), sub: 'Materialien hinterlegen' }),
     noLocation && row({ href: '#/material?offen=1', title: esc(`${plural(noLocation, 'Material', 'Materialien')} ohne Lagerort`), sub: 'Lagerort eintragen' }),
   ].filter(Boolean);
+  const todays = store.deliveriesOn(store.localDate()).filter((d) => store.deliveryQty(d));
+  const todayOpen = todays.filter((d) => !d.no).length;
+  const todayBox = todays.length ? `${sectionTitle('Heute fertig')}<ul class="card list">${row({
+    href: '#/lieferscheine',
+    title: esc(`${palLabel(todays.reduce((s, d) => s + store.deliveryPallets(d), 0))} · ${fmtN(todays.reduce((s, d) => s + store.deliveryQty(d), 0))} Satz`),
+    sub: esc(todayOpen ? `${plural(todayOpen, 'Auftrag', 'Aufträge')} noch ohne Lieferschein` : 'Alle Lieferscheine erstellt'),
+    tag: todayOpen ? `<span class="tag tag-warn">${todayOpen} offen</span>` : '',
+  })}</ul>` : '';
   return `
+    ${todayBox}
     ${working.length ? `${sectionTitle('In Arbeit', working.length)}<ul class="card list">${working.map(orderRow).join('')}</ul>` : ''}
     ${queued.length ? `${sectionTitle('Als nächstes', queued.length)}<ul class="card list">${queued.map(orderRow).join('')}</ul>` : ''}
     ${recent.length ? `${sectionTitle('Zuletzt angesehen')}<ul class="card list">${recent.map(orderRow).join('')}</ul>` : ''}
@@ -664,18 +680,21 @@ function viewOrder(id) {
     html: `
       <div class="detail-head">
         <span class="eyebrow">Auftrag</span>
-        <div class="detail-title">${esc(o.nr)}</div>
+        <div class="detail-title">${nrHtml(o.nr)}</div>
+        ${o.bestellnr ? `<div class="detail-sub">Bestellnummer ${esc(o.bestellnr)}</div>` : ''}
         ${o.note ? `<div class="detail-sub">${esc(o.note)}</div>` : ''}
       </div>
       ${statusSeg(store.orderStatus(o))}
       <div id="after-pick"></div>
       ${afterInfo(o)}
       ${nextBox(o)}
+      ${palletBox(o)}
       ${a ? `<div class="card">${articleBlock(a)}</div>
         <a class="btn btn-secondary btn-block" href="#/artikel/${a.id}/material/neu">${icon.plus}<span>Material zu „${esc(a.name)}“ hinzufügen</span></a>`
         : emptyBox('Kein Artikel zugeordnet', 'Ordne dem Auftrag eine Artikelbezeichnung zu.',
           `<a class="btn btn-primary" href="#/auftrag/${o.id}/bearbeiten">Artikel zuordnen</a>`)}`,
     mount(root) {
+      bindPalletBox(root, o);
       const pick = $('#after-pick', root);
       $('.status-seg', root).addEventListener('click', (e) => {
         const b = e.target.closest('[data-status]');
@@ -847,10 +866,18 @@ function viewOrderEdit(id, query) {
     form: true,
     html: `
       <form class="card form" id="f" novalidate>
-        ${field({ id: 'nr', label: 'Auftragsnummer', value: o?.nr ?? presetNr, placeholder: 'z. B. 630-202878', attrs: `${CODE_ATTRS} enterkeyhint="next"` })}
+        <div class="field">
+          <label for="nr">Auftragsnummer</label>
+          <div class="input-prefix"><span>${store.ORDER_PREFIX}</span>
+            <input id="nr" class="input" value="${esc(o?.nr ?? store.shortNr(presetNr))}" placeholder="231084" maxlength="12" inputmode="numeric" ${CODE_ATTRS} enterkeyhint="next"></div>
+        </div>
         ${field({ id: 'art', label: 'Artikelbezeichnung', value: currentArticle?.name, placeholder: 'suchen, z. B. 5er oder 200er', attrs: 'autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="next"', suggest: true })}
         <div id="art-preview"></div>
-        ${field({ id: 'note', label: 'Notiz', optional: true, value: o?.note, placeholder: 'z. B. Kunde, Menge', attrs: 'autocomplete="off" enterkeyhint="done"' })}
+        <div class="two-col">
+          ${field({ id: 'menge', label: 'Satz im Auftrag', optional: true, value: o?.menge ?? '', placeholder: 'z. B. 1872', attrs: 'inputmode="numeric" autocomplete="off" enterkeyhint="next"' })}
+          ${field({ id: 'bestellnr', label: 'Bestellnummer', optional: true, value: o?.bestellnr, placeholder: 'z. B. 630-197844', attrs: `${CODE_ATTRS} enterkeyhint="next"` })}
+        </div>
+        ${field({ id: 'note', label: 'Notiz', optional: true, value: o?.note, placeholder: 'z. B. Kunde', attrs: 'autocomplete="off" enterkeyhint="done"' })}
         <div class="field"><span class="label">Status</span>${statusSeg(initialStatus)}</div>
         <div class="field" id="after-field"${initialStatus === 'naechstes' ? '' : ' hidden'}>
           <label for="after">Kommt nach</label>
@@ -900,7 +927,7 @@ function viewOrderEdit(id, query) {
         max: 12,
       });
       art.addEventListener('input', preview);
-      nextOnEnter(nr, art, note);
+      nextOnEnter(nr, art, $('#menge', root), $('#bestellnr', root), note);
 
       let status = initialStatus;
       const seg = $('.status-seg', root);
@@ -916,7 +943,8 @@ function viewOrderEdit(id, query) {
         e.preventDefault();
         try {
           const after = status === 'naechstes' ? $('#after', root).value : '';
-          const saved = store.saveOrder({ id: o?.id, nr: nr.value, note: note.value, articleName: art.value, status, after });
+          const saved = store.saveOrder({ id: o?.id, nr: nr.value, note: note.value, articleName: art.value, status, after,
+            menge: $('#menge', root).value, bestellnr: $('#bestellnr', root).value });
           toast(presetAfter && after === presetAfter ? `${saved.nr} kommt nach ${store.getOrder(after)?.nr}` : 'Auftrag gespeichert');
           if (o || (presetAfter && after === presetAfter)) back(o ? `#/auftrag/${saved.id}` : `#/auftrag/${presetAfter}`);
           else replace(`#/auftrag/${saved.id}`);
@@ -941,12 +969,17 @@ function viewOrderEdit(id, query) {
 // Artikel
 // ======================================================================
 
+/** Umschalter Artikel ↔ Material (beide unter dem Tab „Artikel“). */
+const pageSeg = (current) => `<nav class="seg page-seg" aria-label="Ansicht">
+  <a href="#/artikel" aria-pressed="${current === 'artikel'}">Artikel</a>
+  <a href="#/material" aria-pressed="${current === 'material'}">Material</a></nav>`;
+
 function viewArticles(query) {
   const onlyOpen = new URLSearchParams(query || '').get('offen') === '1';
   return {
     title: 'Artikel',
     tab: 'artikel',
-    html: `${filterField('Artikel filtern …', 'artikel')}
+    html: `${pageSeg('artikel')}${filterField('Artikel filtern …', 'artikel')}
       ${onlyOpen ? filterChip('Nur Artikel ohne Material', '#/artikel') : ''}
       <div id="list"></div>
       <a class="fab" href="#/artikel/neu" aria-label="Neuer Artikel">${icon.plus}</a>`,
@@ -983,12 +1016,16 @@ function viewArticle(id) {
     title: 'Artikel',
     back: '#/artikel',
     tab: 'artikel',
-    action: editAction(`#/artikel/${a.id}/bearbeiten`, 'Artikel umbenennen'),
+    action: editAction(`#/artikel/${a.id}/bearbeiten`, 'Artikel bearbeiten'),
     html: `
       <div class="detail-head">
         <span class="eyebrow">Artikel</span>
         <div class="detail-title">${esc(a.name)}</div>
       </div>
+      <a class="card kvs kvs-link" href="#/artikel/${a.id}/bearbeiten">
+        <div class="kv"><span>Satz pro Palette</span><span>${a.perPallet ? `<b>${fmtN(a.perPallet)}</b>` : '<span class="warn-text">fehlt</span>'}</span></div>
+        <div class="kv"><span>Lieferschein-Text</span><span>${esc(store.lsTextOf(a))}</span></div>
+      </a>
       ${sectionTitle('Materialien', nMat)}
       ${nMat ? `<div class="card art">${materialList(a)}</div>` : ''}
       <a class="btn btn-primary btn-block" href="#/artikel/${a.id}/material/neu">${icon.plus}<span>Material hinzufügen</span></a>
@@ -1006,23 +1043,30 @@ function viewArticleEdit(id, query) {
   if (id && !a) return notFound('Artikel');
   const preset = new URLSearchParams(query || '').get('name') || '';
   return {
-    title: a ? 'Artikel umbenennen' : 'Neuer Artikel',
+    title: a ? 'Artikel bearbeiten' : 'Neuer Artikel',
     back: a ? `#/artikel/${a.id}` : '#/artikel',
     tab: 'artikel',
     form: true,
     html: `
       <form class="card form" id="f" novalidate>
-        ${field({ id: 'name', label: 'Artikelbezeichnung', value: a?.name ?? preset, placeholder: 'z. B. 5er, 200er', attrs: 'autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="done"' })}
+        ${field({ id: 'name', label: 'Artikelbezeichnung', value: a?.name ?? preset, placeholder: 'z. B. 5er, 200er', attrs: 'autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="next"' })}
+        ${field({ id: 'per', label: 'Satz pro Palette', value: a?.perPallet ?? '', placeholder: 'z. B. 144', attrs: 'inputmode="numeric" autocomplete="off" enterkeyhint="next"', hint: 'Für „1 Palette“ beim Fertigmelden.' })}
+        <div class="field">
+          <label for="lstext">Text auf dem Lieferschein <span class="opt">optional</span></label>
+          <textarea id="lstext" class="input textarea" rows="2" placeholder="${esc(a ? store.lsTextOf({ name: a.name }) : 'Konfektionierung - <Artikelbezeichnung>')}">${esc(a?.lsText || '')}</textarea>
+          <p class="hint">Leer lassen = „Konfektionierung - Artikelbezeichnung“.</p>
+        </div>
         <p class="form-error" id="err" role="alert"></p>
         <button class="btn btn-primary btn-block" type="submit">Speichern</button>
       </form>
       ${a ? deleteButton('Artikel löschen') : ''}`,
     mount(root) {
       const name = $('#name', root);
+      nextOnEnter(name, $('#per', root));
       $('#f', root).addEventListener('submit', (e) => {
         e.preventDefault();
         try {
-          const saved = store.saveArticle({ id: a?.id, name: name.value });
+          const saved = store.saveArticle({ id: a?.id, name: name.value, perPallet: $('#per', root).value, lsText: $('#lstext', root).value });
           toast('Artikel gespeichert');
           if (a) back(`#/artikel/${saved.id}`);
           else replace(`#/artikel/${saved.id}`);
@@ -1166,6 +1210,447 @@ function viewAddMaterial(articleId) {
 // ======================================================================
 // Material
 // ======================================================================
+
+// ======================================================================
+// Paletten & Lieferscheine
+// ======================================================================
+
+const fmtN = (n) => Number(n || 0).toLocaleString('de-DE');
+const fmtDay = (iso) => (iso ? iso.split('-').reverse().join('.') : '');
+const dayLabel = (iso) => new Date(`${iso}T12:00`).toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+const shiftDay = (iso, n) => { const d = new Date(`${iso}T12:00`); d.setDate(d.getDate() + n); return store.localDate(d); };
+const isIsoDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
+const palLabel = (n) => `${fmtN(n)} ${n === 1 ? 'Palette' : 'Paletten'}`;
+const nrHtml = (nr) => `<span class="nr-prefix">${store.ORDER_PREFIX}</span>${esc(nr)}`;
+
+/** Fortschritt eines Auftrags: fertig gemeldete Satz (auf Lieferscheinen + noch ohne) von der Auftragsmenge. */
+function progressHtml(o) {
+  const p = store.orderProgress(o.id);
+  if (!p.total && !p.done) return '<p class="hint progress-none">Noch nichts fertig gemeldet.</p>';
+  const pct = (n) => (p.total ? Math.min(100, (n / p.total) * 100) : 0);
+  const dPct = pct(p.delivered);
+  const oPct = Math.max(0, Math.min(100 - dPct, pct(p.open)));
+  return `<div class="progress">
+    <div class="progress-top"><span><b>${fmtN(p.done)}</b>${p.total ? ` von ${fmtN(p.total)}` : ''} Satz fertig</span>
+      ${p.total ? `<span class="progress-pct">${Math.round((p.done / p.total) * 100)} %</span>` : ''}</div>
+    ${p.total ? `<div class="bar"><span class="bar-done" style="width:${dPct}%"></span><span class="bar-open" style="width:${oPct}%"></span></div>` : ''}
+    <div class="progress-legend">
+      <span class="lg lg-done">${fmtN(p.delivered)} auf Lieferscheinen</span>
+      ${p.open ? `<span class="lg lg-open">${fmtN(p.open)} ohne Lieferschein</span>` : ''}
+      ${p.total && p.total > p.done ? `<span class="lg">noch ${fmtN(p.total - p.done)}</span>` : ''}
+    </div>
+  </div>`;
+}
+
+/** Kurzform für Listen: „1.200 / 5.000 Satz“. */
+function progressShort(o) {
+  const p = store.orderProgress(o.id);
+  if (p.total) return `${fmtN(p.done)} / ${fmtN(p.total)} Satz`;
+  return p.done ? `${fmtN(p.done)} Satz fertig` : '';
+}
+
+/** Am Auftrag: Paletten melden + Fortschritt + heutige Lieferung. */
+function palletBox(o) {
+  const a = store.getArticle(o.articleId);
+  const per = a?.perPallet || 0;
+  const today = store.deliveryFor(o.id, store.localDate());
+  const n = store.deliveriesOfOrder(o.id).filter((d) => d.no).length;
+  return `<section class="card pallet-box">
+    <div class="box-head"><span>Fertig gemeldet</span>
+      ${n ? `<a href="#/lieferscheine/alle?auftrag=${o.id}">${plural(n, 'Lieferschein', 'Lieferscheine')}</a>` : ''}</div>
+    ${progressHtml(o)}
+    <div class="pallet-actions">
+      <button type="button" class="btn btn-primary pallet-btn" data-pallet ${per ? '' : 'disabled'}>
+        ${icon.plus}<span>1 Palette<small>${per ? `${fmtN(per)} Satz` : 'Satz/Palette fehlt'}</small></span></button>
+      <a class="btn btn-secondary" href="#/eintrag/neu?auftrag=${o.id}">Andere Menge</a>
+    </div>
+    ${!per && a ? `<p class="hint">Für „1 Palette“ beim Artikel <a href="#/artikel/${a.id}/bearbeiten">Satz pro Palette eintragen</a>.</p>` : ''}
+    ${today ? `<a class="today-line" href="#/lieferschein/${today.id}">
+        <span><b>Heute:</b> ${palLabel(store.deliveryPallets(today))} · ${fmtN(store.deliveryQty(today))} Satz</span>
+        <span class="today-ls">${today.no ? `Lieferschein ${esc(today.no)}${store.deliveryChanged(today) ? ' · geändert' : ''}` : 'noch ohne Lieferschein'}</span>${icon.chevron}</a>` : ''}
+  </section>`;
+}
+
+function bindPalletBox(root, o) {
+  $('.pallet-box [data-pallet]', root)?.addEventListener('click', () => {
+    const per = store.getArticle(o.articleId)?.perPallet;
+    if (!per) return;
+    try {
+      const { delivery, entry } = store.addEntry(o.id, { qty: per, pallets: 1 });
+      navigator.vibrate?.(25);
+      const changed = delivery.no ? ` · Lieferschein ${delivery.no} neu verschicken` : '';
+      toast(`Palette erfasst – heute ${palLabel(store.deliveryPallets(delivery))}${changed}`, 'ok', {
+        label: 'Rückgängig', run: () => store.removeDeliveryEntry(delivery.id, entry.id),
+      });
+    } catch (ex) { toast(ex.message, 'error'); }
+  });
+}
+
+/** Zeile in Lieferschein-Listen. */
+function deliveryRow(d, { showDate = false } = {}) {
+  const o = store.getOrder(d.orderId);
+  const a = store.getArticle(o?.articleId);
+  const nr = o?.nr || d.orderNr || '?';
+  const sub = [showDate ? fmtDay(d.date) : '', d.no ? `Auftrag ${nr}` : a?.name,
+    `${fmtN(store.deliveryQty(d))} Satz`, palLabel(store.deliveryPallets(d))].filter(Boolean).join(' · ');
+  return row({
+    href: `#/lieferschein/${d.id}`,
+    title: d.no ? `Nr. ${esc(d.no)}` : `Auftrag ${esc(nr)}`,
+    sub: esc(sub),
+    tag: store.deliveryChanged(d) ? '<span class="tag tag-warn">geändert</span>'
+      : d.no ? '' : '<span class="tag">ohne Lieferschein</span>',
+  });
+}
+
+// ---------- PDF erzeugen & teilen ----------
+
+const pdfCache = new Map();
+/** PDF für Lieferscheine (wird gemerkt, damit „Teilen“ beim Tippen sofort bereit ist). */
+function pdfFile(list) {
+  const notes = list.map(store.noteData).sort((a, b) => String(a.no).localeCompare(String(b.no)));
+  const key = JSON.stringify(notes);
+  if (!pdfCache.has(key)) {
+    const name = notes.length === 1 ? `Lieferschein_${notes[0].no}.pdf`
+      : `Lieferscheine_${notes[0].no}-${notes[notes.length - 1].no}.pdf`;
+    const p = deliveryPdf(notes).then((blob) => new File([blob], name, { type: 'application/pdf' }));
+    p.catch(() => pdfCache.delete(key));
+    pdfCache.set(key, p);
+    while (pdfCache.size > 8) pdfCache.delete(pdfCache.keys().next().value);
+  }
+  return pdfCache.get(key);
+}
+
+function downloadFile(file) {
+  const url = URL.createObjectURL(file);
+  const link = Object.assign(document.createElement('a'), { href: url, download: file.name });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
+async function sharePdf(list) {
+  if (!list.length) return;
+  try {
+    const file = await pdfFile(list);
+    if (matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
+      await navigator.share({ files: [file], title: file.name.replace(/\.pdf$/, '').replace(/_/g, ' ') });
+    } else {
+      downloadFile(file);
+    }
+    store.markPrinted(list.map((d) => d.id));
+  } catch (ex) {
+    if (ex.name === 'AbortError') return;
+    if (ex.name === 'NotAllowedError') { toast('PDF ist fertig – bitte noch einmal tippen.'); return; }
+    console.error(ex);
+    toast(`PDF fehlgeschlagen: ${ex.message}`, 'error');
+  }
+}
+
+async function createNotes(ids, btn) {
+  if (!ids.length) return;
+  const label = btn?.innerHTML;
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner small"></span><span>Wird erstellt …</span>'; }
+  try {
+    const created = await store.createDeliveryNotes(ids);
+    if (!created.length) { toast('Nichts zu erstellen.'); return; }
+    const nos = created.map((c) => c.no);
+    toast(nos.length === 1 ? `Lieferschein ${nos[0]} erstellt` : `Lieferscheine ${nos[0]}–${nos[nos.length - 1]} erstellt`);
+  } catch (ex) {
+    console.error(ex);
+    toast(ex.code === 'unavailable' ? 'Keine Verbindung – Lieferscheine bitte mit Empfang erstellen.' : ex.message, 'error');
+  } finally {
+    if (btn?.isConnected) { btn.disabled = false; btn.innerHTML = label; }
+  }
+}
+
+// ---------- Tagesübersicht ----------
+
+function viewDeliveries(query) {
+  const params = new URLSearchParams(query || '');
+  const date = isIsoDate(params.get('datum')) ? params.get('datum') : store.localDate();
+  const today = store.localDate();
+  return {
+    title: 'Lieferscheine',
+    tab: 'lieferscheine',
+    html: `
+      <div class="day-nav">
+        <button type="button" class="icon-btn" data-day="-1" aria-label="Vorheriger Tag">${icon.back}</button>
+        <label class="day-pick"><span>${date === today ? 'Heute' : esc(dayLabel(date).split(',')[0])}</span>
+          <input type="date" id="day" value="${date}" max="${today}" aria-label="Tag wählen"><b>${fmtDay(date)}</b></label>
+        <button type="button" class="icon-btn" data-day="1" aria-label="Nächster Tag" ${date >= today ? 'disabled' : ''}>${icon.chevron}</button>
+      </div>
+      <div id="day-body"></div>`,
+    mount(root) {
+      const go2 = (d) => replace(`#/lieferscheine${d === today ? '' : `?datum=${d}`}`);
+      root.querySelector('.day-nav').addEventListener('click', (e) => {
+        const b = e.target.closest('[data-day]');
+        if (b && !b.disabled) go2(shiftDay(date, Number(b.dataset.day)));
+      });
+      $('#day', root).addEventListener('change', (e) => { if (isIsoDate(e.target.value)) go2(e.target.value); });
+
+      const draw = () => {
+        const all = store.deliveriesOn(date).filter((d) => d.no || store.deliveryQty(d));
+        const open = all.filter((d) => !d.no).sort((a, b) => natCmp(a.orderNr || '', b.orderNr || ''));
+        const done = all.filter((d) => d.no).sort((a, b) => String(a.no).localeCompare(String(b.no)));
+        const qty = all.reduce((s, d) => s + store.deliveryQty(d), 0);
+        const pallets = all.reduce((s, d) => s + store.deliveryPallets(d), 0);
+        const add = `<a class="btn btn-secondary btn-block" href="#/eintrag/neu?datum=${date}">${icon.plus}<span>Palette / Satz ${date === today ? 'eintragen' : `für den ${fmtDay(date)} nachtragen`}</span></a>`;
+        $('#day-body', root).innerHTML = !all.length
+          ? `${emptyBox(date === today ? 'Heute noch nichts fertig gemeldet' : 'An diesem Tag nichts eingetragen',
+              'Fertige Paletten meldest du beim Auftrag mit „1 Palette“ – oder hier eintragen.')}${add}
+             <a class="btn btn-secondary btn-block" href="#/lieferscheine/alle">Alle Lieferscheine</a>`
+          : `<div class="card day-sum"><b>${palLabel(pallets)}</b><span>${fmtN(qty)} Satz · ${plural(all.length, 'Auftrag', 'Aufträge')}</span></div>
+            ${open.length ? `${sectionTitle('Noch ohne Lieferschein', open.length)}
+              <ul class="card list">${open.map((d) => deliveryRow(d)).join('')}</ul>
+              <button type="button" class="btn btn-primary btn-block" id="create-all">${icon.check}<span>${open.length === 1 ? 'Lieferschein erstellen' : `${open.length} Lieferscheine erstellen`}</span></button>` : ''}
+            ${done.length ? `${sectionTitle('Lieferscheine', done.length)}
+              <ul class="card list">${done.map((d) => deliveryRow(d)).join('')}</ul>
+              <button type="button" class="btn ${open.length ? 'btn-secondary' : 'btn-primary'} btn-block" id="share-all">${icon.share}<span>${done.length === 1 ? 'PDF teilen / drucken' : `PDF mit allen ${done.length} teilen / drucken`}</span></button>` : ''}
+            ${add}
+            <a class="btn btn-secondary btn-block" href="#/lieferscheine/alle">Alle Lieferscheine</a>`;
+        $('#create-all', root)?.addEventListener('click', (e) => createNotes(open.map((d) => d.id), e.currentTarget));
+        $('#share-all', root)?.addEventListener('click', () => sharePdf(done));
+        if (done.length) pdfFile(done).catch(() => {});
+      };
+      draw();
+      return draw;
+    },
+  };
+}
+
+// ---------- Ein Lieferschein ----------
+
+let previewFor = null;
+
+function viewDelivery(id) {
+  const d = store.getDelivery(id);
+  if (!d) return notFound('Lieferschein');
+  const o = store.getOrder(d.orderId);
+  const a = store.getArticle(o?.articleId);
+  const n = store.noteData(d);
+  const entries = store.entriesOf(d);
+  const changed = store.deliveryChanged(d);
+  const kv = (k, v) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`;
+  const view = {
+    title: d.no ? 'Lieferschein' : 'Lieferung',
+    back: `#/lieferscheine${d.date === store.localDate() ? '' : `?datum=${d.date}`}`,
+    tab: 'lieferscheine',
+    html: `
+      <div class="detail-head">
+        <span class="eyebrow">${d.no ? 'Lieferschein' : 'Noch ohne Lieferschein'}</span>
+        <div class="detail-title">${d.no ? `Nr. ${esc(d.no)}` : nrHtml(n.orderNr.replace(store.ORDER_PREFIX, ''))}</div>
+        <div class="detail-sub">${esc(dayLabel(d.date))}</div>
+      </div>
+      ${changed ? `<p class="notice">Seit dem Erstellen geändert (vorher ${fmtN(d.printedQty)} Satz / ${palLabel(d.printedPallets)}) – bitte neu verschicken.</p>` : ''}
+      <div class="card kvs">
+        ${kv('Auftrag', o ? `<a href="#/auftrag/${o.id}">${esc(n.orderNr)}</a>` : esc(n.orderNr))}
+        ${kv('Bestellnummer', n.bestellnr ? esc(n.bestellnr)
+          : `<span class="warn-text">fehlt</span>${o ? ` · <a href="#/auftrag/${o.id}/bearbeiten">ergänzen</a>` : ''}`)}
+        ${kv('Text', esc(n.text) + (a ? ` · <a href="#/artikel/${a.id}/bearbeiten">ändern</a>` : ''))}
+        ${kv('Stück (Satz)', `<b>${fmtN(n.qty)}</b>`)}
+        ${kv('Paletten', `<b>${fmtN(n.pallets)}</b>`)}
+        ${kv('Liefermenge', `${fmtN(n.prev)} + ${fmtN(n.qty)} = <b>${fmtN(n.prev + n.qty)}</b>${n.total ? ` von ${fmtN(n.total)}` : ''}`)}
+        ${d.no ? kv('Erstellt', fmtDay(d.createdOn)) : ''}
+      </div>
+      ${d.no ? `<button type="button" class="btn btn-primary btn-block" id="share">${icon.share}<span>PDF teilen / drucken</span></button>`
+        : `<button type="button" class="btn btn-primary btn-block" id="create" ${n.qty ? '' : 'disabled'}>${icon.check}<span>Lieferschein erstellen</span></button>
+           <p class="hint center">Die Nummer (nächste: ${store.nextDeliveryNo()}) wird beim Erstellen vergeben.</p>`}
+      <button type="button" class="btn btn-secondary btn-block" id="preview">${previewFor === d.id ? 'Vorschau schließen' : 'Vorschau'}</button>
+      <div id="pdf-box" class="file-view is-pdf" ${previewFor === d.id ? '' : 'hidden'}></div>
+      ${sectionTitle('Einträge', entries.length)}
+      ${entries.length ? `<ul class="card list">${entries.map((e) => row({
+        href: `#/eintrag/${d.id}/${e.id}`,
+        title: `${fmtN(e.qty)} Satz · ${palLabel(Number(e.pallets) || 0)}`,
+        sub: esc(e.at ? new Date(e.at).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''),
+      })).join('')}</ul>` : '<p class="hint">Keine Einträge.</p>'}
+      <a class="btn btn-secondary btn-block" href="#/eintrag/neu?auftrag=${d.orderId}&datum=${d.date}">${icon.plus}<span>Eintrag hinzufügen</span></a>
+      ${deleteButton(d.no ? 'Lieferschein löschen' : 'Lieferung löschen')}`,
+    mount(root) {
+      const box = $('#pdf-box', root);
+      const showPreview = async () => {
+        box.innerHTML = '<div class="loading"><span class="spinner"></span>PDF wird erstellt …</div>';
+        try {
+          const file = await pdfFile([d.no ? d : { ...d, no: 'ENTWURF' }]);
+          if (currentView !== view) return;
+          box.innerHTML = '';
+          await renderPdf(file, box, () => currentView === view);
+        } catch (ex) {
+          console.error(ex);
+          box.innerHTML = `<p class="empty-inline pad">${esc(ex.message)}</p>`;
+        }
+      };
+      if (previewFor === d.id) showPreview();
+      $('#preview', root).addEventListener('click', (e) => {
+        previewFor = previewFor === d.id ? null : d.id;
+        box.hidden = previewFor !== d.id;
+        e.currentTarget.textContent = previewFor === d.id ? 'Vorschau schließen' : 'Vorschau';
+        if (previewFor === d.id) showPreview();
+      });
+      $('#share', root)?.addEventListener('click', () => sharePdf([d]));
+      $('#create', root)?.addEventListener('click', (e) => createNotes([d.id], e.currentTarget));
+      if (d.no) pdfFile([d]).catch(() => {});
+      $('#del', root).addEventListener('click', () => {
+        const what = d.no ? `Lieferschein ${d.no}` : 'diese Lieferung';
+        if (!confirm(`${what} mit allen Einträgen löschen?${d.no ? '\n\nDie Nummer wird nicht neu vergeben.' : ''}`)) return;
+        store.deleteDelivery(d.id);
+        toast(d.no ? `Lieferschein ${d.no} gelöscht` : 'Lieferung gelöscht');
+        back(view.back);
+      });
+    },
+  };
+  return view;
+}
+
+// ---------- Eintrag (Palette / Satz) anlegen oder ändern ----------
+
+function viewEntryEdit(deliveryId, entryId, query) {
+  const params = new URLSearchParams(query || '');
+  const d = deliveryId ? store.getDelivery(deliveryId) : null;
+  const e = d?.entries?.find((x) => x.id === entryId);
+  if (deliveryId && !e) return notFound('Eintrag');
+  let order = store.getOrder(d?.orderId || params.get('auftrag') || '');
+  const date0 = d?.date || (isIsoDate(params.get('datum')) ? params.get('datum') : store.localDate());
+  const perOf = (o) => store.getArticle(o?.articleId)?.perPallet || 0;
+  return {
+    title: e ? 'Eintrag ändern' : 'Palette / Satz eintragen',
+    back: d ? `#/lieferschein/${d.id}` : order ? `#/auftrag/${order.id}` : '#/lieferscheine',
+    tab: order && !d ? 'auftraege' : 'lieferscheine',
+    form: true,
+    html: `
+      <form class="card form" id="f" novalidate>
+        ${field({ id: 'ord', label: 'Auftrag', value: order?.nr || '', placeholder: '6 Ziffern, z. B. 231084', suggest: true,
+          attrs: `${CODE_ATTRS} inputmode="numeric" enterkeyhint="next" ${e ? 'readonly' : ''}` })}
+        <div id="ord-info" class="ord-info"></div>
+        <div class="field"><label for="date">Tag</label><input id="date" class="input" type="date" value="${date0}" max="${store.localDate()}"></div>
+        <div class="two-col">
+          ${field({ id: 'qty', label: 'Satz', value: e?.qty ?? '', placeholder: '0', attrs: 'inputmode="numeric" autocomplete="off" enterkeyhint="next"' })}
+          ${field({ id: 'pal', label: 'Paletten', value: e?.pallets ?? '', placeholder: '1', attrs: 'inputmode="numeric" autocomplete="off" enterkeyhint="done"' })}
+        </div>
+        <p class="hint" id="target-hint" hidden></p>
+        <p class="form-error" id="err" role="alert"></p>
+        <button class="btn btn-primary btn-block" type="submit">Speichern</button>
+      </form>
+      ${e ? deleteButton('Eintrag löschen') : ''}`,
+    mount(root) {
+      const ord = $('#ord', root);
+      const dateIn = $('#date', root);
+      const qty = $('#qty', root);
+      const pal = $('#pal', root);
+      let palTouched = Boolean(e);
+      const info = () => {
+        const per = perOf(order);
+        $('#ord-info', root).innerHTML = order
+          ? `${esc(store.getArticle(order.articleId)?.name || 'kein Artikel')}${per ? ` · ${fmtN(per)} Satz pro Palette` : ''} · ${esc(progressShort(order) || 'noch nichts fertig')}`
+          : '';
+        const target = order && store.deliveryFor(order.id, dateIn.value);
+        const hint = $('#target-hint', root);
+        hint.hidden = !target?.no;
+        if (target?.no) hint.textContent = `Für diesen Tag gibt es schon Lieferschein ${target.no} – er wird angepasst und muss neu verschickt werden.`;
+        if (!palTouched) {
+          const q = Number(String(qty.value).replace(/\D/g, '')) || 0;
+          pal.value = q ? (per ? Math.max(1, Math.ceil(q / per)) : 1) : '';
+        }
+      };
+      attachSuggest(ord, {
+        source: (q) => {
+          const m = matcher(q);
+          return rank(store.orders(), (x) => (q.trim() ? m(x.nr) : 1), byStatusThenNewest)
+            .filter(({ x }) => store.orderStatus(x) !== 'fertig' || q.trim())
+            .map(({ x }) => ({ label: x.nr, sub: [orderSummary(x), STATUS_LABEL[store.orderStatus(x)]].filter(Boolean).join(' · '), order: x }));
+        },
+        onPick: (it) => { order = it.order; ord.value = order.nr; info(); qty.focus(); },
+        max: 8,
+      });
+      ord.addEventListener('input', () => { order = store.findOrderByNr(ord.value); info(); });
+      dateIn.addEventListener('change', info);
+      qty.addEventListener('input', info);
+      pal.addEventListener('input', () => { palTouched = pal.value !== ''; if (!palTouched) info(); });
+      nextOnEnter(ord, qty, pal);
+      if (!e && order && !qty.value) {
+        qty.value = perOf(order) || '';
+      }
+      info();
+
+      $('#f', root).addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        try {
+          if (!order) throw new Error('Bitte einen Auftrag wählen.');
+          const v = { date: dateIn.value, qty: qty.value, pallets: pal.value };
+          const res = e ? store.updateEntry(d.id, e.id, v) : store.addEntry(order.id, v).delivery;
+          toast(`${fmtN(Number(String(qty.value).replace(/\D/g, '')))} Satz eingetragen${res.no ? ` · Lieferschein ${res.no} neu verschicken` : ''}`);
+          back(d ? `#/lieferschein/${res.id}` : `#/auftrag/${order.id}`);
+        } catch (ex) {
+          $('#err', root).textContent = ex.message;
+        }
+      });
+      $('#del', root)?.addEventListener('click', () => {
+        if (!confirm('Eintrag löschen?')) return;
+        store.removeDeliveryEntry(d.id, e.id);
+        toast('Eintrag gelöscht');
+        back(store.getDelivery(d.id) ? `#/lieferschein/${d.id}` : '#/lieferscheine');
+      });
+      if (!order) ord.focus();
+      else if (!e) { qty.focus(); qty.select(); }
+    },
+  };
+}
+
+// ---------- Liste aller Lieferscheine ----------
+
+function viewDeliveryList(query) {
+  const params = new URLSearchParams(query || '');
+  const onlyOrder = store.getOrder(params.get('auftrag') || '');
+  return {
+    title: 'Alle Lieferscheine',
+    back: onlyOrder ? `#/auftrag/${onlyOrder.id}` : '#/lieferscheine',
+    tab: 'lieferscheine',
+    html: `${filterField('Nummer, Auftrag, Bestellnr. …', 'lieferscheine')}
+      ${onlyOrder ? filterChip(`Auftrag ${onlyOrder.nr}`, '#/lieferscheine/alle') : ''}
+      ${onlyOrder ? `<div class="card pad-card">${progressHtml(onlyOrder)}</div>` : ''}
+      <div id="list"></div>
+      <button type="button" class="btn btn-secondary btn-block" id="csv">${icon.download}<span>Liste als Tabelle (CSV)</span></button>`,
+    mount(root) {
+      let shown = [];
+      const draw = () => {
+        const q = state.filter.lieferscheine || '';
+        const m = matcher(q);
+        shown = store.deliveries().filter((d) => d.no && (!onlyOrder || d.orderId === onlyOrder.id))
+          .filter((d) => {
+            if (!q.trim()) return true;
+            const o = store.getOrder(d.orderId);
+            return m(d.no) || m(o?.nr || d.orderNr) || m(store.fullNr(o?.nr || d.orderNr)) || m(o?.bestellnr || d.bestellnr)
+              || m(store.getArticle(o?.articleId)?.name) || m(fmtDay(d.date));
+          })
+          .sort((a, b) => b.date.localeCompare(a.date) || String(b.no).localeCompare(String(a.no)));
+        const sum = shown.reduce((s, d) => s + store.deliveryQty(d), 0);
+        $('#list', root).innerHTML = shown.length
+          ? `<p class="list-sum">${plural(shown.length, 'Lieferschein', 'Lieferscheine')} · ${fmtN(sum)} Satz</p>
+             <ul class="card list">${shown.slice(0, 300).map((d) => deliveryRow(d, { showDate: true })).join('')}</ul>`
+          : emptyBox('Keine Lieferscheine', q.trim() ? 'Filter anpassen oder löschen.' : 'Lieferscheine entstehen unter „Lieferscheine“ aus den fertig gemeldeten Paletten.');
+        $('#csv', root).hidden = !shown.length;
+      };
+      bindFilter(root, 'lieferscheine', draw);
+      $('#csv', root).addEventListener('click', () => {
+        const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+        const head = ['Lieferscheinnummer', 'Lieferdatum', 'Erstellt am', 'Auftragsnummer', 'Bestellnummer', 'Artikel', 'Text', 'Satz', 'Paletten', 'Bisher geliefert', 'Gesamt nach Lieferung', 'Satz im Auftrag'];
+        const rows = [...shown].reverse().map((d) => {
+          const n = store.noteData(d);
+          const art = store.getArticle(store.getOrder(d.orderId)?.articleId)?.name || '';
+          return [n.no, fmtDay(d.date), fmtDay(d.createdOn), n.orderNr, n.bestellnr, art, n.text, n.qty, n.pallets, n.prev, n.prev + n.qty, n.total || ''];
+        });
+        const csv = `﻿${[head, ...rows].map((r) => r.map(cell).join(';')).join('\r\n')}`;
+        const name = `lieferscheine-${store.localDate()}.csv`;
+        const file = new File([csv], name, { type: 'text/csv' });
+        if (matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
+          navigator.share({ files: [file], title: 'Lieferscheine' }).catch(() => {});
+        } else downloadFile(file);
+      });
+      draw();
+      return draw;
+    },
+  };
+}
 
 // ======================================================================
 // Packhinweise
@@ -1320,8 +1805,8 @@ function viewMaterials(query) {
   const sorts = [['location', 'Lagerort'], ['description', 'Beschreibung'], ['nr', 'Nummer']];
   return {
     title: 'Material',
-    tab: 'material',
-    html: `${filterField('Material oder Lagerort filtern …', 'material')}
+    tab: 'artikel',
+    html: `${pageSeg('material')}${filterField('Material oder Lagerort filtern …', 'material')}
       ${onlyOpen ? filterChip('Nur Material ohne Lagerort', '#/material') : ''}
       <div class="seg" role="group" aria-label="Sortieren nach">
         ${sorts.map(([k, l]) => `<button type="button" data-sort="${k}">${l}</button>`).join('')}
@@ -1375,7 +1860,7 @@ function viewMaterial(id, query) {
   return {
     title: m ? 'Material' : 'Neues Material',
     back: fromArticle ? `#/artikel/${fromArticle.id}` : '#/material',
-    tab: 'material',
+    tab: 'artikel',
     form: true,
     html: `
       ${m ? `<div class="detail-head mat-head">
@@ -1560,6 +2045,15 @@ function viewMore() {
         <a href="#/material"><b>${store.materials().length}</b><span>Materialien</span></a>
       </div>
 
+      ${sectionTitle('Lieferscheine')}
+      <form class="card box" id="ls-form" novalidate>
+        <p>Die Nummern werden beim Erstellen fortlaufend vergeben. Im neuen Jahr beginnen sie mit JJJJ0001.</p>
+        <div class="field"><label for="next-no">Nächste Lieferscheinnummer</label>
+          <div class="input-row"><input id="next-no" class="input" inputmode="numeric" autocomplete="off" value="${store.nextDeliveryNo()}">
+          <button class="btn btn-secondary" type="submit">Speichern</button></div></div>
+        <p class="form-error" id="ls-err" role="alert"></p>
+      </form>
+
       ${sectionTitle('Speicherung')}
       <div class="card box">
         <p>Die Daten liegen <b>online</b> (Firebase, Rechenzentrum Frankfurt). Alle Mitarbeiter sehen dieselben Daten,
@@ -1579,6 +2073,14 @@ function viewMore() {
       <p class="version">BO-WERT Konfektionierung · v${APP_VERSION}</p>`,
     mount(root) {
       $('#export', root).addEventListener('click', exportBackup);
+      $('#ls-form', root).addEventListener('submit', (e) => {
+        e.preventDefault();
+        try {
+          store.setNextDeliveryNo($('#next-no', root).value);
+          $('#ls-err', root).textContent = '';
+          toast('Nächste Lieferscheinnummer gespeichert');
+        } catch (ex) { $('#ls-err', root).textContent = ex.message; }
+      });
       $('#logout', root).addEventListener('click', logout);
     },
   };

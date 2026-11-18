@@ -10,9 +10,11 @@ welche **Materialien** gebraucht werden und **wo sie im Lager liegen** – und e
 
 ```
 Auftragsnummer  ──►  Artikelbezeichnung (z. B. „5er“, „200er“)  ──►  Materialien (Artikelnummern)
-                     └─ Packhinweise (Fotos / PDFs)                   ├─ Beschreibung (optional)
-                                                                      └─ Lagerort     (optional)
+ ├─ Bestellnummer, Satz im Auftrag  ├─ Satz pro Palette                ├─ Beschreibung (optional)
+ └─ fertige Paletten je Tag ──► Lieferschein  └─ Packhinweise, Lieferschein-Text  └─ Lagerort (optional)
 ```
+
+Auftragsnummern werden nur mit den 6 Ziffern gepflegt (z. B. `231084`); auf dem Lieferschein steht `630-231084`.
 
 Ein Material (Artikelnummer) wird nur einmal gepflegt. Ändert sich sein Lagerort, gilt das für alle Artikel.
 
@@ -22,8 +24,9 @@ Ein Material (Artikelnummer) wird nur einmal gepflegt. Ändert sich sein Lageror
 | --- | --- |
 | **Suche** (Start) | Auftragsnummer, Artikelbezeichnung, Artikelnummer oder Lagerort eintippen. „202878“ findet auch „630-202878X“. **123** schaltet auf die Zahlentastatur. |
 | **Aufträge** | Status je Auftrag: **Nicht begonnen · Als nächstes · In Arbeit · Abgeschlossen** (auf der Auftragsseite mit einem Tipp umschalten, Liste danach filtern, „In Arbeit“ und „Als nächstes“ stehen auch auf der Startseite). **Als nächstes** wird an einen laufenden Auftrag gekoppelt: Am laufenden Auftrag den nächsten wählen (oder neu anlegen) – dort steht dann „Als nächstes: …“ mit **Starten**-Knopf, in Listen „→ danach …“. Beim Abschließen bietet die App an, den nächsten direkt zu starten. Auftrag anlegen und Artikelbezeichnung zuordnen – beim Tippen („5“) werden passende Artikel vorgeschlagen, inkl. Vorschau der Materialien. Unbekannte Bezeichnungen werden neu angelegt. |
-| **Artikel** | Materialien per Artikelnummer zuordnen. Bekannte Nummern füllen Beschreibung und Lagerort automatisch aus. **Packhinweise:** Foto (direkt mit der Kamera) oder PDF hochladen – erscheint bei jedem Auftrag mit diesem Artikel. Antippen zeigt Foto bzw. alle PDF-Seiten in der App; umbenennen, teilen, löschen. |
-| **Material** | Alle Materialien mit Lagerort, sortierbar. |
+| **Fertig melden** | Auf der Auftragsseite **1 Palette** (= Satz pro Palette des Artikels) oder **Andere Menge** (Satz + Paletten, auch für frühere Tage). Fortschritt „x von y Satz“ steht am Auftrag und in der Auftragsliste. |
+| **Lieferscheine** | Tagesübersicht (mit ‹ › frühere Tage): pro Auftrag ein Lieferschein mit der Tagessumme. **Lieferscheine erstellen** vergibt fortlaufende Nummern (JJJJ + laufende Nummer, im neuen Jahr ab JJJJ0001; nächste Nummer unter ⚙ änderbar). **PDF teilen / drucken** erzeugt alle Lieferscheine des Tages als eine PDF im Layout der alten Word-Vorlage. Wird danach noch etwas geändert, ist der Lieferschein als „geändert“ markiert und kann mit derselben Nummer neu verschickt werden. **Alle Lieferscheine**: Liste mit Filter und Export als Tabelle (CSV). |
+| **Artikel** | Umschalter **Artikel / Material** oben. Satz pro Palette und Text auf dem Lieferschein (leer = „Konfektionierung - Artikelbezeichnung“). Materialien per Artikelnummer zuordnen. Bekannte Nummern füllen Beschreibung und Lagerort automatisch aus. **Packhinweise:** Foto (direkt mit der Kamera) oder PDF hochladen – erscheint bei jedem Auftrag mit diesem Artikel. Antippen zeigt Foto bzw. alle PDF-Seiten in der App; umbenennen, teilen, löschen. |
 | **Bestellliste** | Überall, wo ein Lagerort steht, gibt es **Entnehmen** → das Material landet hier (mehrfach tippen = Menge +1). Menge anpassen, als *bestellt* markieren, bei Eintreffen abhaken, Liste per WhatsApp/Mail **teilen**. |
 | ⚙ **Mehr** | Datenbestand, Sicherungskopie (JSON), Anleitung „Als App installieren“, Abmelden. |
 
@@ -54,18 +57,26 @@ js/store.js            Firestore: Live-Abgleich, Speichern, Bestellliste
 js/config.js           Firebase-Projektdaten + Team-Konto
 js/ui.js               Helfer: Suche, Sortierung, Icons, Vorschläge
 js/files.js            Packhinweise: Fotos verkleinern, PDF-Anzeige
+js/lieferschein.js     Lieferschein-PDF (Nachbau der Word-Vorlage, Koordinaten aus der alten PDF)
 vendor/pdfjs/          pdf.js 4.10.38 (Mozilla, Apache-2.0) zum Anzeigen von PDFs
+vendor/jspdf/          jsPDF 3.0.3 (MIT) zum Erzeugen der Lieferscheine
+vendor/fonts/          Caladea (OFL) – maßgleich zu Cambria aus der Word-Vorlage
 sw.js                  Service Worker (App-Dateien offline)
 firestore.rules        Zugriffsregeln der Datenbank
 ```
 
 **Neue Version veröffentlichen:** committen und pushen, vorher in `sw.js` die Konstante `CACHE` hochzählen
-(z. B. `konf-v6`), damit installierte Apps die neuen Dateien laden.
+(z. B. `konf-v7`), damit installierte Apps die neuen Dateien laden.
 **Regeln ändern:** `firebase deploy --only firestore`.
 
 **Kostenlos-Grenzen (Spark):** 50.000 Lesevorgänge und 20.000 Schreibvorgänge pro Tag, 1 GB Speicher,
 10 GB Datenübertragung pro Monat – reicht für einige Tausend Fotos/PDFs.
 
-## Geplant
+## Daten der Lieferscheine
 
-- **Paletten-Erfassung:** fertige Palette pro Auftrag notieren, Tagesübersicht am Abend (weitere Sammlung `pallets`).
+- `deliveries/{Auftrag}_{Datum}`: Einträge (Satz, Paletten, Zeit) eines Auftrags an einem Tag; mit Nummer = Lieferschein.
+  Menge und Paletten ergeben sich immer aus den Einträgen. „Gesamtliefermenge bisher“ = Summe der Lieferscheine
+  dieses Auftrags an früheren Tagen.
+- `settings/lieferschein`: nächste freie Nummer. Vergabe per Firestore-Transaktion (keine doppelten Nummern,
+  braucht Internetverbindung).
+- Der Ordner `AlteVorlagen/` (altes Python-Skript, enthält Zugangsdaten) ist per `.gitignore` ausgeschlossen.

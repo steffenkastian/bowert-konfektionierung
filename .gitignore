@@ -2,3 +2,6 @@
 Thumbs.db
 *.log
 .firebase/
+
+# Alte Python-Vorlagen (enthalten Zugangsdaten) – nicht veröffentlichen
+AlteVorlagen/

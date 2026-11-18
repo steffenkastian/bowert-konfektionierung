@@ -1,12 +1,20 @@
 // Datenhaltung: Firebase Firestore (online, für alle Mitarbeiter gemeinsam, mit Offline-Cache).
 //
 // Struktur:
-//   orders/{id}     { nr, articleId, note, status, after } Auftragsnummer → eine Artikelbezeichnung
+//   orders/{id}     { nr, articleId, note, status, after, bestellnr, menge }
+//                   nr: die 6 Ziffern nach „630-“ (auf dem Lieferschein steht „630-“ davor)
+//                   menge: Satz, die zum Auftrag gehören (optional)
 //                   status: „neu“ (nicht begonnen) | „naechstes“ (als nächstes) | „arbeit“ (in Arbeit)
 //                           | „fertig“ (abgeschlossen)
 //                   after: bei „naechstes“ die ID des laufenden Auftrags, nach dem er drankommt („“ = keiner)
-//   articles/{id}   { name, materialIds: [], files: [] }  Artikelbezeichnung (z. B. „5er“) → Materialien
+//   articles/{id}   { name, materialIds: [], files: [], perPallet, lsText }
+//                   Artikelbezeichnung (z. B. „5er“) → Materialien; perPallet = Satz pro Palette,
+//                   lsText = Text auf dem Lieferschein (leer → „Konfektionierung - <Bezeichnung>“)
 //                   files: Packhinweise (Foto/PDF) als { id, name, type, size, parts, thumb, createdAt }
+//   deliveries/{orderId}_{datum}  { orderId, date, entries: [{ id, at, qty, pallets }], no, … }
+//                   Fertige Paletten/Satz eines Auftrags an einem Tag. Mit Nummer (no) ist es ein
+//                   Lieferschein; Menge und Paletten ergeben sich immer aus den Einträgen.
+//   settings/lieferschein  { next }   nächste freie Lieferscheinnummer (JJJJ + laufende Nummer)
 //   files/{fileId}-{n}  { articleId, fileId, part, parts, data: Bytes }
 //                   Dateiinhalt in Stücken < 1 MB (Firestore-Grenze je Dokument). Wird nicht live
 //                   abgeglichen, sondern erst beim Öffnen geladen (danach im Offline-Cache).
@@ -22,7 +30,7 @@ import {
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
   collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, writeBatch,
-  increment, arrayUnion, arrayRemove, getDoc, getDocFromCache, Bytes,
+  increment, arrayUnion, arrayRemove, getDoc, getDocFromCache, Bytes, runTransaction,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 import { firebaseConfig, TEAM_EMAIL } from './config.js';
 import { norm, natCmp } from './ui.js';
@@ -33,7 +41,7 @@ const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
 });
 
-const COLLECTIONS = ['orders', 'articles', 'materials', 'orderlist'];
+const COLLECTIONS = ['orders', 'articles', 'materials', 'orderlist', 'deliveries', 'settings'];
 const data = Object.fromEntries(COLLECTIONS.map((c) => [c, new Map()]));
 const meta = {};
 const loaded = new Set();
@@ -73,6 +81,7 @@ export function startSync() {
       for (const d of snap.docs) map.set(d.id, { id: d.id, ...d.data() });
       meta[name] = snap.metadata;
       loaded.add(name);
+      if (name === 'orders' && !snap.metadata.fromCache) migrateOrderNumbers();
       emit();
     }, (err) => errorHandler(err)));
   }
@@ -100,7 +109,32 @@ export const getOrder = (id) => data.orders.get(id);
 export const getArticle = (id) => data.articles.get(id);
 export const getMaterial = (id) => data.materials.get(id);
 
-export const findOrderByNr = (nr) => (norm(nr) ? orders().find((o) => norm(o.nr) === norm(nr)) : undefined);
+export const ORDER_PREFIX = '630-';
+/** „630-231084“ → „231084“ (in der App werden nur die 6 Ziffern gepflegt). */
+export const shortNr = (nr) => str(nr).replace(/^630\s*-?\s*(?=\d)/, '');
+export const fullNr = (nr) => (str(nr) ? `${ORDER_PREFIX}${shortNr(nr)}` : '');
+export const findOrderByNr = (nr) => (norm(shortNr(nr)) ? orders().find((o) => norm(shortNr(o.nr)) === norm(shortNr(nr))) : undefined);
+
+/** Einmalig: alte Einträge „630-xxxxxx“ auf die 6 Ziffern kürzen. */
+let migrated = false;
+function migrateOrderNumbers() {
+  if (migrated) return;
+  migrated = true;
+  for (const o of orders()) {
+    const short = shortNr(o.nr);
+    if (short === o.nr || orders().some((x) => x.id !== o.id && norm(x.nr) === norm(short))) continue;
+    run(updateDoc(doc(db, 'orders', o.id), { nr: short }));
+    o.nr = short;
+  }
+}
+
+/** Ganze Zahl ≥ 0 aus einer Eingabe („1.200“ → 1200); leer → null. */
+export function parseCount(v, label = 'Menge') {
+  const t = str(v).replace(/[.\s]/g, '');
+  if (!t) return null;
+  if (!/^\d+$/.test(t)) throw new Error(`${label}: bitte eine ganze Zahl eingeben.`);
+  return Number(t);
+}
 export const findArticleByName = (name) => (norm(name) ? articles().find((a) => norm(a.name) === norm(name)) : undefined);
 export const findMaterialByNr = (nr) => (norm(nr) ? materials().find((m) => norm(m.nr) === norm(nr)) : undefined);
 
@@ -143,8 +177,10 @@ export const nextOrders = (id) => orders()
   .filter((o) => o.after === id && orderStatus(o) === 'naechstes')
   .sort((a, b) => (a.queuedAt || '').localeCompare(b.queuedAt || ''));
 
-export function saveOrder({ id, nr, note, articleName, status = 'neu', after = '' }) {
-  nr = str(nr);
+export function saveOrder({ id, nr, note, articleName, status = 'neu', after = '', bestellnr = '', menge = '' }) {
+  nr = shortNr(nr).replace(/\s/g, '');
+  if (nr && !/^\d{6}$/.test(nr)) throw new Error('Die Auftragsnummer hat 6 Ziffern (ohne „630-“), z. B. 231084.');
+  const satz = parseCount(menge, 'Satz im Auftrag');
   articleName = str(articleName);
   if (!nr) throw new Error('Bitte eine Auftragsnummer eingeben.');
   if (!articleName) throw new Error('Bitte eine Artikelbezeichnung wählen oder eingeben.');
@@ -159,7 +195,7 @@ export function saveOrder({ id, nr, note, articleName, status = 'neu', after = '
     data.articles.set(article.id, article);
   }
   const orderId = id || newId('orders');
-  const fields = { nr, note: str(note), articleId: article.id, updatedAt: now() };
+  const fields = { nr, note: str(note), articleId: article.id, bestellnr: str(bestellnr), menge: satz, updatedAt: now() };
   if (!id) fields.createdAt = now();
   if (!ORDER_STATUSES.includes(status)) status = 'neu';
   const prev = id ? getOrder(id) : null;
@@ -188,13 +224,17 @@ export function deleteOrder(id) {
 
 // ---------- Artikel ----------
 
-export function saveArticle({ id, name }) {
+export const lsTextOf = (a) => str(a?.lsText) || (a ? `Konfektionierung - ${a.name}` : '');
+
+export function saveArticle({ id, name, perPallet = '', lsText = '' }) {
   name = str(name);
   if (!name) throw new Error('Bitte eine Artikelbezeichnung eingeben.');
   const dupe = findArticleByName(name);
   if (dupe && dupe.id !== id) throw new Error(`Artikel „${dupe.name}“ gibt es schon.`);
+  const per = parseCount(perPallet, 'Satz pro Palette');
+  if (per === 0) throw new Error('Satz pro Palette: bitte mindestens 1 eingeben (oder leer lassen).');
   const articleId = id || newId('articles');
-  const fields = { name, updatedAt: now() };
+  const fields = { name, perPallet: per, lsText: str(lsText), updatedAt: now() };
   if (!id) Object.assign(fields, { materialIds: [], createdAt: now() });
   run(setDoc(doc(db, 'articles', articleId), fields, { merge: true }));
   data.articles.set(articleId, { materialIds: [], ...data.articles.get(articleId), id: articleId, ...fields });
@@ -447,12 +487,221 @@ export function reopenEntry(entryId) {
   emit();
 }
 
+// ---------- Paletten & Lieferscheine ----------
+
+const pad2 = (n) => String(n).padStart(2, '0');
+/** Datum als „JJJJ-MM-TT“ in Ortszeit. */
+export const localDate = (d = new Date()) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const DEFAULT_NEXT_NO = 20261197;
+
+export const deliveries = () => [...data.deliveries.values()];
+export const getDelivery = (id) => data.deliveries.get(id);
+const deliveryKey = (orderId, date) => `${orderId}_${date}`;
+export const deliveryFor = (orderId, date) => data.deliveries.get(deliveryKey(orderId, date));
+export const entriesOf = (d) => [...(d?.entries || [])].sort((a, b) => (a.at || '').localeCompare(b.at || ''));
+export const deliveryQty = (d) => (d?.entries || []).reduce((sum, e) => sum + (Number(e.qty) || 0), 0);
+export const deliveryPallets = (d) => (d?.entries || []).reduce((sum, e) => sum + (Number(e.pallets) || 0), 0);
+/** Lieferschein schon erstellt, danach aber Menge/Paletten geändert → neu verschicken. */
+export const deliveryChanged = (d) => Boolean(d?.no)
+  && (d.printedQty !== deliveryQty(d) || d.printedPallets !== deliveryPallets(d));
+const byDateNo = (a, b) => a.date.localeCompare(b.date) || String(a.no || '').localeCompare(String(b.no || ''));
+export const deliveriesOfOrder = (orderId) => deliveries().filter((d) => d.orderId === orderId).sort(byDateNo);
+export const deliveriesOn = (date) => deliveries().filter((d) => d.date === date);
+
+/** Satz eines Auftrags: auf Lieferscheinen (geliefert) und noch ohne Lieferschein (offen). */
+export function orderProgress(orderId) {
+  let delivered = 0;
+  let open = 0;
+  for (const d of deliveriesOfOrder(orderId)) {
+    if (d.no) delivered += deliveryQty(d); else open += deliveryQty(d);
+  }
+  return { delivered, open, done: delivered + open, total: getOrder(orderId)?.menge || 0 };
+}
+
+/** „Gesamtliefermenge des Auftrages bisher“: Lieferscheine dieses Auftrags vor diesem Tag. */
+export const deliveredBefore = (d) => deliveriesOfOrder(d.orderId)
+  .filter((x) => x.no && x.id !== d.id && x.date < d.date)
+  .reduce((sum, x) => sum + deliveryQty(x), 0);
+
+function checkEntry({ qty, pallets, date }) {
+  const q = parseCount(qty, 'Satz');
+  const p = parseCount(pallets, 'Paletten') ?? 0;
+  if (!q) throw new Error('Bitte die Anzahl Satz eingeben.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) throw new Error('Bitte ein Datum wählen.');
+  return { qty: q, pallets: p };
+}
+
+function snapshotFields(o) {
+  return { orderNr: o?.nr || '' };
+}
+
+/** Fertige Palette / Satz für einen Auftrag eintragen (Tag: `date`). */
+export function addEntry(orderId, { date = localDate(), qty, pallets }) {
+  const o = getOrder(orderId);
+  if (!o) throw new Error('Auftrag nicht gefunden.');
+  const v = checkEntry({ qty, pallets, date });
+  const id = deliveryKey(orderId, date);
+  const entry = { id: newId('deliveries'), at: now(), ...v };
+  const existing = data.deliveries.get(id);
+  run(setDoc(doc(db, 'deliveries', id), {
+    orderId, date, ...snapshotFields(o), entries: arrayUnion(entry), updatedAt: now(),
+  }, { merge: true }));
+  data.deliveries.set(id, { ...existing, id, orderId, date, ...snapshotFields(o), entries: [...(existing?.entries || []), entry] });
+  emit();
+  return { delivery: data.deliveries.get(id), entry };
+}
+
+/** Eintrag ändern; bei anderem Datum wandert er zur Lieferung dieses Tages. */
+export function updateEntry(deliveryId, entryId, { date, qty, pallets }) {
+  const d = data.deliveries.get(deliveryId);
+  const old = d?.entries?.find((e) => e.id === entryId);
+  if (!old) throw new Error('Eintrag nicht gefunden.');
+  const v = checkEntry({ qty, pallets, date });
+  if (date === d.date) {
+    const entries = d.entries.map((e) => (e.id === entryId ? { ...e, ...v } : e));
+    run(updateDoc(doc(db, 'deliveries', d.id), { entries, updatedAt: now() }));
+    d.entries = entries;
+    emit();
+    return d;
+  }
+  const batch = writeBatch(db);
+  const rest = d.entries.filter((e) => e.id !== entryId);
+  if (!rest.length && !d.no) {
+    batch.delete(doc(db, 'deliveries', d.id));
+    data.deliveries.delete(d.id);
+  } else {
+    batch.update(doc(db, 'deliveries', d.id), { entries: rest, updatedAt: now() });
+    d.entries = rest;
+  }
+  const o = getOrder(d.orderId);
+  const targetId = deliveryKey(d.orderId, date);
+  const moved = { ...old, ...v };
+  batch.set(doc(db, 'deliveries', targetId), {
+    orderId: d.orderId, date, ...snapshotFields(o) , entries: arrayUnion(moved), updatedAt: now(),
+  }, { merge: true });
+  const target = data.deliveries.get(targetId);
+  data.deliveries.set(targetId, { ...target, id: targetId, orderId: d.orderId, date, ...snapshotFields(o),
+    entries: [...(target?.entries || []), moved] });
+  run(batch.commit());
+  emit();
+  return data.deliveries.get(targetId);
+}
+
+export function removeDeliveryEntry(deliveryId, entryId) {
+  const d = data.deliveries.get(deliveryId);
+  if (!d) return;
+  const rest = (d.entries || []).filter((e) => e.id !== entryId);
+  if (!rest.length && !d.no) {
+    run(deleteDoc(doc(db, 'deliveries', d.id)));
+    data.deliveries.delete(d.id);
+  } else {
+    run(updateDoc(doc(db, 'deliveries', d.id), { entries: rest, updatedAt: now() }));
+    d.entries = rest;
+  }
+  emit();
+}
+
+export function deleteDelivery(id) {
+  run(deleteDoc(doc(db, 'deliveries', id)));
+  data.deliveries.delete(id);
+  emit();
+}
+
+/** Nächste freie Lieferscheinnummer; im neuen Jahr beginnt sie mit JJJJ0001. */
+function nextFree(stored, year = new Date().getFullYear()) {
+  let next = Number(stored) || DEFAULT_NEXT_NO;
+  if (Math.floor(next / 10000) < year) next = year * 10000 + 1;
+  return next;
+}
+export const nextDeliveryNo = () => nextFree(data.settings.get('lieferschein')?.next);
+
+export function setNextDeliveryNo(value) {
+  const n = parseCount(value, 'Lieferscheinnummer');
+  if (!n || String(n).length !== 8) throw new Error('Die Lieferscheinnummer hat 8 Ziffern, z. B. 20261197.');
+  const used = deliveries().filter((d) => Number(d.no) >= n).map((d) => d.no).sort();
+  if (used.length) throw new Error(`Nummer ${used[0]} ist schon vergeben – bitte eine höhere wählen.`);
+  run(setDoc(doc(db, 'settings', 'lieferschein'), { next: n, updatedAt: now() }, { merge: true }));
+  data.settings.set('lieferschein', { ...data.settings.get('lieferschein'), id: 'lieferschein', next: n });
+  emit();
+}
+
+/**
+ * Vergibt Lieferscheinnummern (fortlaufend, in einer Transaktion – auch wenn zwei Handys
+ * gleichzeitig erstellen, gibt es keine doppelten Nummern). Braucht eine Internetverbindung.
+ */
+export async function createDeliveryNotes(ids) {
+  if (!navigator.onLine) throw new Error('Für die Lieferscheinnummer wird eine Internetverbindung gebraucht.');
+  const settingsRef = doc(db, 'settings', 'lieferschein');
+  const created = await runTransaction(db, async (tx) => {
+    const s = await tx.get(settingsRef);
+    const snaps = [];
+    for (const id of ids) snaps.push(await tx.get(doc(db, 'deliveries', id)));
+    let next = nextFree(s.exists() ? s.data().next : null);
+    const out = [];
+    for (const snap of snaps) {
+      if (!snap.exists()) continue;
+      const d = { id: snap.id ?? snap.ref.id, ...snap.data() };
+      if (d.no || !deliveryQty(d)) continue;
+      const o = getOrder(d.orderId);
+      const a = getArticle(o?.articleId);
+      const fields = {
+        no: String(next), createdAt: now(), createdOn: localDate(), updatedAt: now(),
+        printedQty: deliveryQty(d), printedPallets: deliveryPallets(d),
+        orderNr: o?.nr || d.orderNr || '', bestellnr: o?.bestellnr || '', text: lsTextOf(a), menge: o?.menge || null,
+      };
+      tx.update(snap.ref, fields);
+      out.push({ id: d.id, ...fields });
+      next += 1;
+    }
+    tx.set(settingsRef, { next, updatedAt: now() }, { merge: true });
+    return out;
+  });
+  for (const c of created) Object.assign(data.deliveries.get(c.id) || {}, c);
+  emit();
+  return created;
+}
+
+/** Daten für das PDF – aktuelle Auftrags-/Artikeldaten, sonst die beim Erstellen gemerkten. */
+export function noteData(d) {
+  const o = getOrder(d.orderId);
+  const a = getArticle(o?.articleId);
+  return {
+    id: d.id,
+    no: d.no,
+    orderNr: fullNr(o?.nr || d.orderNr),
+    bestellnr: o ? str(o.bestellnr) : str(d.bestellnr),
+    deliveryDate: d.date,
+    date: d.createdOn || localDate(),
+    qty: deliveryQty(d),
+    pallets: deliveryPallets(d),
+    text: a ? lsTextOf(a) : d.text || '',
+    prev: deliveredBefore(d),
+    total: o ? o.menge || 0 : d.menge || 0,
+  };
+}
+
+/** Nach dem Teilen/Drucken: aktuellen Stand als „verschickt“ merken. */
+export function markPrinted(ids) {
+  const batch = writeBatch(db);
+  let any = false;
+  for (const id of ids) {
+    const d = data.deliveries.get(id);
+    if (!d?.no || !deliveryChanged(d)) continue;
+    const fields = { printedQty: deliveryQty(d), printedPallets: deliveryPallets(d) };
+    batch.update(doc(db, 'deliveries', id), fields);
+    Object.assign(d, fields);
+    any = true;
+  }
+  if (any) { run(batch.commit()); emit(); }
+}
+
 // ---------- Export ----------
 
 export function exportJSON() {
   return JSON.stringify({
     app: 'bowert-konfektionierung', version: 2, exportedAt: now(),
     orders: orders(), articles: articles(), materials: materials(), orderlist: orderlist(),
+    deliveries: deliveries().map((d) => ({ ...d, qty: deliveryQty(d), pallets: deliveryPallets(d) })),
   }, null, 2);
 }
 
