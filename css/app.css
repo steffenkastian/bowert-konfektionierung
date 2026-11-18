@@ -912,3 +912,5 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 36px;
 .pick-main small { color: var(--muted); font-size: 13.5px; font-variant-numeric: tabular-nums; }
 .pick-head input, .pick-row input { width: 22px; height: 22px; flex: none; accent-color: var(--primary); }
 .detail-title .tag { vertical-align: middle; font-size: 13px; }
+.raise-table { margin: -4px -16px 12px; }
+.raise-table .tbl td small { white-space: normal; }

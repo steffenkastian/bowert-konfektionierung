@@ -853,6 +853,7 @@ export const VAT_RATE = 0.19;
 const DEFAULT_INVOICE_NO = 20260548;
 export const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
+const deDate = (iso) => String(iso || '').split('-').reverse().join('.');
 
 // ---------- Preise ----------
 
@@ -896,8 +897,67 @@ export function setPrice(articleId, { from, price }) {
   const p = parsePrice(price);
   const list = [...priceList(articleId).filter((x) => x.from !== from), { from, price: p }].sort((a, b) => a.from.localeCompare(b.from));
   const hit = billedAffected(articleId, list);
-  if (hit) throw new Error(`Das würde den schon abgerechneten Lieferschein ${hit.no} (${hit.date}) ändern. Bitte ein späteres Datum wählen.`);
+  if (hit) throw new Error(`Das würde den schon abgerechneten Lieferschein ${hit.no} (${deDate(hit.date)}) ändern. Bitte ein späteres Datum wählen.`);
   writePrices(articleId, list);
+}
+
+const dayBefore = (iso) => { const d = new Date(`${iso}T12:00`); d.setDate(d.getDate() - 1); return localDate(d); };
+const round4 = (n) => Math.round((Number(n) + Number.EPSILON) * 10000) / 10000;
+
+/** „11“, „11,5“, „-3“ → Zahl (Prozent). */
+export function parsePercent(v) {
+  const t = str(v).replace(/[%\s]/g, '').replace(',', '.');
+  if (!/^-?\d+(\.\d{1,2})?$/.test(t)) throw new Error('Bitte den Prozentsatz als Zahl eingeben, z. B. 11 oder 2,5.');
+  const n = Number(t);
+  if (!n || n <= -50 || n > 100) throw new Error('Der Prozentsatz muss zwischen -50 und 100 liegen (nicht 0).');
+  return n;
+}
+
+/**
+ * Vorschau einer Preiserhöhung: neuer Preis = Preis am Vortag × (1 + p/100), auf 4 Nachkommastellen gerundet.
+ * Basis ist der Vortag, damit ein zweiter Klick mit demselben Datum nicht doppelt erhöht.
+ */
+export function priceRaisePlan(percent, from) {
+  const p = parsePercent(percent);
+  if (!isDate(from)) throw new Error('Bitte das Datum wählen, ab dem die neuen Preise gelten.');
+  const base = dayBefore(from);
+  return articles()
+    .map((a) => {
+      const old = priceAt(a.id, base);
+      if (old == null) return null;
+      const later = priceList(a.id).find((x) => x.from > from);
+      return { articleId: a.id, name: a.name, old, price: round4(old * (1 + p / 100)), later };
+    })
+    .filter(Boolean)
+    .sort((x, y) => natCmp(x.name, y.name));
+}
+
+/** Alle Preise ab `from` um `percent` % ändern (alles oder nichts). Gibt eine Funktion zum Rückgängigmachen zurück. */
+export function raiseAllPrices(percent, from) {
+  const plan = priceRaisePlan(percent, from);
+  if (!plan.length) throw new Error('Kein Artikel hat vor diesem Datum einen Preis.');
+  const lists = plan.map((x) => ({
+    articleId: x.articleId,
+    before: priceList(x.articleId),
+    after: [...priceList(x.articleId).filter((y) => y.from !== from), { from, price: x.price }]
+      .sort((a, b) => a.from.localeCompare(b.from)),
+  }));
+  for (const l of lists) {
+    const hit = billedAffected(l.articleId, l.after);
+    if (hit) throw new Error(`Ab ${deDate(from)} ist schon abgerechnet (Lieferschein ${hit.no} vom ${deDate(hit.date)}). Bitte ein späteres Datum wählen.`);
+  }
+  writePriceLists(lists.map((l) => [l.articleId, l.after]));
+  return { count: lists.length, undo: () => writePriceLists(lists.map((l) => [l.articleId, l.before])) };
+}
+
+function writePriceLists(pairs) {
+  const batch = writeBatch(db);
+  for (const [articleId, list] of pairs) {
+    batch.set(doc(db, 'prices', articleId), { list, updatedAt: now() });
+    data.prices.set(articleId, { id: articleId, list });
+  }
+  run(batch.commit());
+  emit();
 }
 
 export function removePrice(articleId, from) {

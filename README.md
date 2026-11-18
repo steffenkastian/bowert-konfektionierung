@@ -40,7 +40,7 @@ und zusätzlich:
 | Bereich | Wofür |
 | --- | --- |
 | **Umsatz** (Start) | Monat mit ‹ › wählen: Umsatz netto (Monat, heute bzw. Vormonat, Jahr), Balken je Tag und je Monat (antippen = Wert), Tabelle je Artikel. Umsatz = fertig gemeldete Satz × Preis am Liefertag. Satz ohne Preis werden gemeldet. |
-| **Preise** | Am Artikel: Nettopreis pro Satz mit **gültig ab**. Frühere Lieferungen behalten ihren alten Preis; Preise, die schon abgerechnet sind, lassen sich nicht mehr rückwirkend ändern. |
+| **Preise** | Am Artikel: Nettopreis pro Satz mit **gültig ab**. Frühere Lieferungen behalten ihren alten Preis; Preise, die schon abgerechnet sind, lassen sich nicht mehr rückwirkend ändern. Unter **Preise → Alle Preise erhöhen**: Prozent + Stichtag, Vorschau „bisher → neu“, gilt für alle Artikel mit Preis (Basis: Preis am Vortag, 4 Nachkommastellen), mit Rückgängig. |
 | **Rechnungen** | Zeitraum wählen (Monate mit offenen Lieferscheinen stehen oben), Lieferscheine je Auftrag an-/abwählen. Positionen je Artikel (und Preis), 19 % USt. **Rechnung erstellen** lädt **eine PDF** herunter: Rechnung im Layout der bisherigen Rechnungen (`pdf.py`), dahinter genau die archivierten Lieferscheine. Nummer wird vorgeschlagen (JJJJ + 4 Ziffern), bitte prüfen – der Nummernkreis wird auch für andere Rechnungen benutzt. |
 | **Storno** | An der Rechnung: erzeugt eine Stornorechnung (eigene Nummer, negative Beträge); die Lieferscheine werden wieder frei. |
 

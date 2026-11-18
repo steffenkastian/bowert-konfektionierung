@@ -208,26 +208,93 @@ function viewRevenue(query) {
 // ======================================================================
 
 function viewPrices() {
-  const list = store.articles().sort((a, b) => natCmp(a.name, b.name));
-  const used = new Set(store.revenueRows().map((r) => r.articleId));
-  const missing = list.filter((a) => store.currentPrice(a.id) == null && used.has(a.id));
+  const nextMonth = `${shiftMonth(monthOf(store.localDate()), 1)}-01`;
+  const pctText = (p) => `${String(p).replace('.', ',')} %`;
   return {
     title: 'Preise',
     back: '#/umsatz',
     tab: 'umsatz',
     html: `
       <p class="hint" style="margin:0 4px 12px">Nettopreis pro Satz. Ändert sich ein Preis, mit „gültig ab“ eintragen – frühere Lieferungen behalten ihren alten Preis.</p>
-      ${missing.length ? `<p class="notice">${plural(missing.length, 'Artikel', 'Artikel')} mit Lieferungen, aber ohne Preis.</p>` : ''}
-      ${list.length ? `<ul class="card list">${list.map((a) => {
-        const p = store.currentPrice(a.id);
-        const later = store.priceList(a.id).find((x) => x.from > store.localDate());
-        return C.row({
-          href: `#/artikel/${a.id}`,
-          title: esc(a.name),
-          sub: esc([p != null ? `${priceText(p)} pro Satz` : '', later ? `ab ${C.fmtDay(later.from)}: ${priceText(later.price)}` : ''].filter(Boolean).join(' · ') || 'kein Preis'),
-          tag: p == null ? `<span class="tag ${used.has(a.id) ? 'tag-warn' : ''}">Preis fehlt</span>` : '',
-        });
-      }).join('')}</ul>` : C.emptyBox('Noch keine Artikel', 'Artikel legst du unter „Artikel“ an.')}`,
+      <div id="price-rows"></div>
+      ${C.sectionTitle('Alle Preise erhöhen')}
+      <form class="card form" id="raise" novalidate>
+        <div class="two-col">
+          <div class="field"><label for="pct">Prozent</label>
+            <input id="pct" class="input" inputmode="decimal" autocomplete="off" placeholder="z. B. 11"></div>
+          <div class="field"><label for="pct-from">gültig ab</label>
+            <input id="pct-from" class="input" type="date" value="${nextMonth}"></div>
+        </div>
+        <div id="raise-preview"></div>
+        <p class="hint" id="raise-hint" style="margin:-6px 2px 14px">Jeder Artikel mit Preis bekommt ab dem Datum einen neuen Preis: Preis vom Vortag + Prozent, auf 4 Nachkommastellen gerundet. Frühere Lieferungen bleiben beim alten Preis.</p>
+        <p class="form-error" id="raise-err" role="alert"></p>
+        <button class="btn btn-primary btn-block" type="submit" id="raise-btn" disabled>Preise erhöhen</button>
+      </form>`,
+    mount(root) {
+      const drawList = () => {
+        const list = store.articles().sort((a, b) => natCmp(a.name, b.name));
+        const used = new Set(store.revenueRows().map((r) => r.articleId));
+        const missing = list.filter((a) => store.currentPrice(a.id) == null && used.has(a.id));
+        $('#price-rows', root).innerHTML = `
+          ${missing.length ? `<p class="notice">${plural(missing.length, 'Artikel', 'Artikel')} mit Lieferungen, aber ohne Preis.</p>` : ''}
+          ${list.length ? `<ul class="card list">${list.map((a) => {
+            const p = store.currentPrice(a.id);
+            const later = store.priceList(a.id).filter((x) => x.from > store.localDate());
+            return C.row({
+              href: `#/artikel/${a.id}`,
+              title: esc(a.name),
+              sub: esc([p != null ? `${priceText(p)} pro Satz` : '', ...later.map((x) => `ab ${C.fmtDay(x.from)}: ${priceText(x.price)}`)]
+                .filter(Boolean).join(' · ') || 'kein Preis'),
+              tag: p == null ? `<span class="tag ${used.has(a.id) ? 'tag-warn' : ''}">Preis fehlt</span>` : '',
+            });
+          }).join('')}</ul>` : C.emptyBox('Noch keine Artikel', 'Artikel legst du unter „Artikel“ an.')}`;
+      };
+
+      const pct = $('#pct', root);
+      const from = $('#pct-from', root);
+      const btn = $('#raise-btn', root);
+      const box = $('#raise-preview', root);
+      const err = $('#raise-err', root);
+      const reset = () => { btn.disabled = true; btn.textContent = 'Preise erhöhen'; box.innerHTML = ''; };
+      const preview = () => {
+        err.textContent = '';
+        reset();
+        if (!pct.value.trim()) return;
+        let plan;
+        let p;
+        try {
+          plan = store.priceRaisePlan(pct.value, from.value);
+          p = store.parsePercent(pct.value);
+        } catch (ex) { err.textContent = ex.message; return; }
+        box.innerHTML = plan.length ? `
+          <div class="table-card raise-table"><table class="tbl">
+            <thead><tr><th>Artikel</th><th class="num">bisher</th><th class="num">ab ${C.fmtDay(from.value)}</th></tr></thead>
+            <tbody>${plan.map((x) => `<tr><td>${esc(x.name)}${x.later ? `<small class="warn-text">ab ${C.fmtDay(x.later.from)} gilt weiter ${priceText(x.later.price)}</small>` : ''}</td>
+              <td class="num">${priceText(x.old)}</td><td class="num"><b>${priceText(x.price)}</b></td></tr>`).join('')}</tbody></table></div>`
+          : '<p class="notice">Kein Artikel hat vor diesem Datum einen Preis.</p>';
+        btn.disabled = !plan.length;
+        if (plan.length) btn.textContent = `${plural(plan.length, 'Preis', 'Preise')} um ${pctText(p)} ${p > 0 ? 'erhöhen' : 'senken'}`;
+      };
+      pct.addEventListener('input', preview);
+      from.addEventListener('change', preview);
+      $('#raise', root).addEventListener('submit', (e) => {
+        e.preventDefault();
+        try {
+          const plan = store.priceRaisePlan(pct.value, from.value);
+          const p = store.parsePercent(pct.value);
+          const day = C.fmtDay(from.value);
+          if (!confirm(`${plural(plan.length, 'Preis', 'Preise')} ab ${day} um ${pctText(p)} ${p > 0 ? 'erhöhen' : 'senken'}?`)) return;
+          const res = store.raiseAllPrices(pct.value, from.value);
+          toast(`${plural(res.count, 'Preis', 'Preise')} ab ${day} geändert`, 'ok', {
+            label: 'Rückgängig', run: () => { res.undo(); toast('Preisänderung zurückgenommen'); },
+          });
+          pct.value = '';
+          reset();
+        } catch (ex) { err.textContent = ex.message; }
+      });
+      drawList();
+      return drawList;
+    },
   };
 }
 
