@@ -65,6 +65,11 @@ export const onError = (fn) => { errorHandler = fn; };
 
 export const watchAuth = (cb) => onAuthStateChanged(auth, cb);
 export const login = (password) => signInWithEmailAndPassword(auth, TEAM_EMAIL, password);
+/** Anmelde-Token für den Mail-Dienst (wird dort bei Google geprüft). */
+export function idToken() {
+  if (!auth.currentUser) return Promise.reject(new Error('Nicht angemeldet.'));
+  return auth.currentUser.getIdToken();
+}
 export async function logout() {
   stopSync();
   await signOut(auth);
@@ -713,10 +718,27 @@ export function saveUmlagerungTemplate(bytes, name) {
 }
 
 export function setUmlagerungMail(to) {
-  to = str(to);
-  if (to && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) throw new Error('Bitte eine gültige E-Mail-Adresse eingeben.');
+  const list = str(to).split(/[,;\s]+/).filter(Boolean);
+  const bad = list.find((a) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a));
+  if (bad) throw new Error(`Bitte eine gültige E-Mail-Adresse eingeben („${bad}“).`);
+  if (list.length > 5) throw new Error('Höchstens 5 Empfänger.');
+  to = list.join(', ');
   run(setDoc(doc(db, 'settings', 'umlagerung'), { to, updatedAt: now() }, { merge: true }));
   data.settings.set('umlagerung', { ...umlagerungSettings(), id: 'umlagerung', to });
+  emit();
+}
+
+// ---------- Mailversand (Google Apps Script im Gmail-Arbeitskonto) ----------
+// settings/mail { url }  – Web-App-URL des Skripts (mail/Code.gs)
+
+export const mailService = () => data.settings.get('mail')?.url || '';
+export function setMailService(url) {
+  url = str(url);
+  if (url && !/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url)) {
+    throw new Error('Bitte die Web-App-URL aus Apps Script einfügen (https://script.google.com/macros/s/…/exec).');
+  }
+  run(setDoc(doc(db, 'settings', 'mail'), { url, updatedAt: now() }, { merge: true }));
+  data.settings.set('mail', { ...data.settings.get('mail'), id: 'mail', url });
   emit();
 }
 

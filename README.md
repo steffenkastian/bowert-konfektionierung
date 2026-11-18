@@ -68,11 +68,28 @@ firestore.rules        Zugriffsregeln der Datenbank
 ```
 
 **Neue Version veröffentlichen:** committen und pushen, vorher in `sw.js` die Konstante `CACHE` hochzählen
-(z. B. `konf-v8`), damit installierte Apps die neuen Dateien laden.
+(z. B. `konf-v10`), damit installierte Apps die neuen Dateien laden.
 **Regeln ändern:** `firebase deploy --only firestore`.
 
 **Kostenlos-Grenzen (Spark):** 50.000 Lesevorgänge und 20.000 Schreibvorgänge pro Tag, 1 GB Speicher,
 10 GB Datenübertragung pro Monat – reicht für einige Tausend Fotos/PDFs.
+
+## Mailversand (Gmail-Arbeitskonto)
+
+Umlagerungsscheine gehen mit **Jetzt senden** direkt aus der App raus – ohne Mail-Programm. Dafür läuft ein kleines
+Google-Apps-Script im Gmail-Arbeitskonto ([`mail/Code.gs`](mail/Code.gs)), das die Mail mit Anhang verschickt.
+
+**Einrichtung (einmalig, am Computer, im Gmail-Arbeitskonto angemeldet):**
+1. https://script.google.com → **Neues Projekt** → den Inhalt von `mail/Code.gs` komplett einfügen → Speichern.
+2. **Bereitstellen → Neue Bereitstellung** → Zahnrad: **Web-App**. *Ausführen als:* **Ich**, *Zugriff:* **Jeder** → Bereitstellen.
+3. Berechtigungen bestätigen (bei „Google hat diese App nicht überprüft“: *Erweitert → Zu … wechseln*).
+4. Die **Web-App-URL** (endet auf `/exec`) in der App unter ⚙ Mehr → **Mailversand** eintragen → **Verbindung testen**.
+5. Unter ⚙ Mehr → Umlagerungsschein den **Mail-Empfänger** eintragen (mehrere mit Komma).
+
+Sicherheit: Die App schickt ihr Anmelde-Token mit, das Skript lässt es von Google prüfen und verschickt nur für das
+Team-Konto. Die Skript-URL steht nur in der (geschützten) Datenbank, nicht im öffentlichen Code.
+Gmail erlaubt ca. 100 Empfänger pro Tag. Wird `Code.gs` geändert: *Bereitstellungen verwalten → Bearbeiten →
+Neue Version* (die URL bleibt gleich).
 
 ## Daten der Lieferscheine
 
@@ -81,6 +98,7 @@ firestore.rules        Zugriffsregeln der Datenbank
   dieses Auftrags an früheren Tagen.
 - `settings/lieferschein`: nächste freie Nummer. Vergabe per Firestore-Transaktion (keine doppelten Nummern,
   braucht Internetverbindung).
+- `settings/mail`: Web-App-URL des Mail-Skripts.
 - `settings/umlagerung`: Excel-Vorlage des Umlagerungsscheins (nicht im öffentlichen Repo, da Kundenformular)
   und optional der Mail-Empfänger. Geändert werden beim Ausfüllen nur Spalte A, die ausgeblendeten Zeilen
   (Autofilter auf Spalte A) und der gespeicherte Wert der Datumsformel in C6.

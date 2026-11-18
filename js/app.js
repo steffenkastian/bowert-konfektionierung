@@ -9,7 +9,7 @@ import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 import { deliveryPdf } from './lieferschein.js';
 import { fillUmlagerung, readTemplate, loadFflate, digits } from './umlagerung.js';
 
-const APP_VERSION = '3.1.1';
+const APP_VERSION = '3.2.0';
 const PREFS_KEY = 'konf.ui';
 const LIST_LIMIT = 40;
 const CODE_ATTRS = 'autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false"';
@@ -1686,23 +1686,31 @@ function umlagBox() {
       <a href="#/mehr">Unter ⚙ Mehr hochladen</a>.</p></div>`;
   }
   const pallets = items.reduce((s, i) => s + i.qty, 0);
+  const direct = Boolean(store.mailService() && st.to);
   return `<div class="card box umlag">
     <div class="umlag-head">${icon.download}<div><b>Umlagerungsschein</b>
       <span>${plural(items.length, 'Position', 'Positionen')} · ${plural(pallets, 'Palette', 'Paletten')} <span class="muted">(Menge = Anzahl Paletten)</span></span></div></div>
     <p class="umlag-missing" id="umlag-missing" hidden></p>
-    <div class="btn-row2">
+    ${direct ? `<div class="btn-row2">
+      <button type="button" class="btn btn-primary" id="umlag-send">${icon.send}<span>Jetzt senden</span></button>
+      <button type="button" class="btn btn-secondary" id="umlag-dl">${icon.download}<span>Excel</span></button>
+    </div>
+    <p class="hint">Geht direkt an ${esc(st.to)} · <button type="button" class="link-btn" id="umlag-mail">über Mail-App</button></p>`
+    : `<div class="btn-row2">
       <button type="button" class="btn btn-primary" id="umlag-mail">${icon.share}<span>Per Mail senden</span></button>
       <button type="button" class="btn btn-secondary" id="umlag-dl">${icon.download}<span>Excel</span></button>
     </div>
     ${st.to ? `<p class="hint">Empfänger: ${esc(st.to)}</p>` : ''}
-    ${isAndroid ? '<p class="hint">Android: Die Excel-Datei wird gespeichert und die Mail-App geöffnet – dort über 📎 aus „Downloads“ anhängen.</p>' : ''}
+    ${store.mailService() && !st.to ? '<p class="hint">Für „Jetzt senden“ unter ⚙ einen Mail-Empfänger eintragen.</p>' : ''}
+    ${isAndroid ? '<p class="hint">Android: Die Excel-Datei wird gespeichert und die Mail-App geöffnet – dort über 📎 aus „Downloads“ anhängen.</p>' : ''}`}
   </div>`;
 }
 
 async function bindUmlag(root) {
   const box = $('.umlag', root);
-  if (!box || !$('#umlag-mail', box)) return;
-  $('#umlag-mail', box).addEventListener('click', () => sendUmlagerung(true));
+  if (!box || !$('#umlag-dl', box)) return;
+  $('#umlag-send', box)?.addEventListener('click', (e) => sendUmlagerungDirect(e.currentTarget));
+  $('#umlag-mail', box)?.addEventListener('click', () => sendUmlagerung(true));
   $('#umlag-dl', box).addEventListener('click', () => sendUmlagerung(false));
   prepareUmlagerung().catch((ex) => console.error(ex)); // schon vorab erzeugen → Tippen wirkt sofort
   try {
@@ -1807,6 +1815,64 @@ async function sendUmlagerung(asMail) {
   } catch (ex) {
     console.error(ex);
     toast(`Umlagerungsschein fehlgeschlagen: ${ex.message}`, 'error');
+  }
+}
+
+
+// ---------- Direkter Mailversand (Google Apps Script, mail/Code.gs) ----------
+
+async function fileBase64(file) {
+  const u = new Uint8Array(await file.arrayBuffer());
+  let s = '';
+  for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+/** Schickt eine Anfrage an den Mail-Dienst. payload: { to, subject, body, files } oder { test: true }. */
+async function callMailService({ files = [], ...payload }) {
+  const url = store.mailService();
+  if (!url) throw new Error('Kein Mailversand eingerichtet (⚙ Mehr → Mailversand).');
+  if (!navigator.onLine) throw new Error('Für den Versand wird eine Internetverbindung gebraucht.');
+  const request = {
+    ...payload,
+    idToken: await store.idToken(),
+    attachments: await Promise.all(files.map(async (f) => ({ name: f.name, mimeType: f.type, data: await fileBase64(f) }))),
+  };
+  let res;
+  try {
+    // Ohne eigenen Content-Type (= text/plain) → keine CORS-Vorabanfrage, die Apps Script nicht beantwortet
+    res = await fetch(url, { method: 'POST', body: JSON.stringify(request) });
+  } catch {
+    throw new Error('Mail-Dienst nicht erreichbar.');
+  }
+  let answer;
+  try { answer = await res.json(); } catch {
+    throw new Error('Unerwartete Antwort vom Mail-Dienst – ist die Web-App für „Jeder“ freigegeben?');
+  }
+  if (!answer.ok) throw new Error(answer.fehler || 'Versand fehlgeschlagen.');
+  return answer;
+}
+
+async function sendUmlagerungDirect(btn) {
+  const to = store.umlagerungSettings().to;
+  try {
+    const ready = umlagReady?.key === umlagKey() && umlagReady.value;
+    const { file, items } = ready || await prepareUmlagerung();
+    const n = plural(items.length, 'Position', 'Positionen');
+    if (!confirm(`Umlagerungsschein (${n}) jetzt an ${to} senden?`)) return;
+    const label = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner small"></span><span>Wird gesendet …</span>';
+    try {
+      const { subject, body } = mailText(file, items, false);
+      await callMailService({ to, subject, body, files: [file] });
+    } finally {
+      if (btn.isConnected) { btn.disabled = false; btn.innerHTML = label; }
+    }
+    offerMarkOrdered(items, `Gesendet an ${to} (${n})`);
+  } catch (ex) {
+    console.error(ex);
+    toast(`Senden fehlgeschlagen: ${ex.message}`, 'error');
   }
 }
 
@@ -2238,8 +2304,22 @@ function viewMore() {
         <div class="field" style="margin-top:14px"><label for="umlag-to">Mail-Empfänger <span class="opt">optional</span></label>
           <div class="input-row"><input id="umlag-to" class="input" type="email" inputmode="email" autocomplete="off" value="${esc(store.umlagerungSettings().to || '')}" placeholder="name@firma.de">
           <button class="btn btn-secondary" type="submit">Speichern</button></div>
-          <p class="hint">Am Computer wird die Mail an diese Adresse vorbereitet. Am Handy wählst du den Empfänger im Mail-Programm.</p></div>
+          <p class="hint">Mehrere Adressen mit Komma trennen. Mit eingerichtetem Mailversand geht der Schein mit „Jetzt senden“ direkt dorthin.</p></div>
         <p class="form-error" id="umlag-err" role="alert"></p>
+      </form>
+
+      ${sectionTitle('Mailversand')}
+      <form class="card box" id="mail-form" novalidate>
+        <p>Direkt aus der App verschicken – über das Gmail-Arbeitskonto (Google Apps Script).
+          <a href="https://github.com/steffenkastian/bowert-konfektionierung/blob/main/mail/Code.gs" target="_blank" rel="noopener">Skript &amp; Anleitung</a></p>
+        <div class="field"><label for="mail-url">Web-App-URL</label>
+          <input id="mail-url" class="input" type="url" inputmode="url" autocomplete="off" spellcheck="false" value="${esc(store.mailService())}" placeholder="https://script.google.com/macros/s/…/exec"></div>
+        <div class="btn-row2 mail-btns">
+          <button class="btn btn-secondary" type="submit">Speichern</button>
+          <button class="btn btn-secondary" type="button" id="mail-test" ${store.mailService() ? '' : 'disabled'}>Verbindung testen</button>
+        </div>
+        <p class="hint" id="mail-status"></p>
+        <p class="form-error" id="mail-err" role="alert"></p>
       </form>
 
       ${sectionTitle('Speicherung')}
@@ -2261,6 +2341,29 @@ function viewMore() {
       <p class="version">BO-WERT Konfektionierung · v${APP_VERSION}</p>`,
     mount(root) {
       $('#export', root).addEventListener('click', exportBackup);
+      $('#mail-form', root).addEventListener('submit', (e) => {
+        e.preventDefault();
+        try {
+          store.setMailService($('#mail-url', root).value);
+          $('#mail-err', root).textContent = '';
+          $('#mail-test', root).disabled = !store.mailService();
+          toast(store.mailService() ? 'Mailversand gespeichert – jetzt „Verbindung testen“' : 'Mailversand ausgeschaltet');
+        } catch (ex) { $('#mail-err', root).textContent = ex.message; }
+      });
+      $('#mail-test', root).addEventListener('click', async (e) => {
+        const b = e.currentTarget;
+        const status = $('#mail-status', root);
+        b.disabled = true;
+        status.textContent = 'Wird geprüft …';
+        $('#mail-err', root).textContent = '';
+        try {
+          const r = await callMailService({ test: true });
+          status.textContent = `✓ Verbunden – Absender ${r.absender}${r.restKontingent != null ? `, heute noch ${r.restKontingent} Mails möglich` : ''}.`;
+        } catch (ex) {
+          status.textContent = '';
+          $('#mail-err', root).textContent = ex.message;
+        } finally { b.disabled = !store.mailService(); }
+      });
       $('#tpl-up', root).addEventListener('click', () => $('#tpl-file', root).click());
       $('#tpl-file', root).addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) uploadTemplate(f); });
       $('#umlag-form', root).addEventListener('submit', (e) => {
