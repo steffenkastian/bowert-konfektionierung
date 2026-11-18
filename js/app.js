@@ -9,7 +9,7 @@ import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 import { deliveryPdf } from './lieferschein.js';
 import { fillUmlagerung, readTemplate, loadFflate, digits } from './umlagerung.js';
 
-const APP_VERSION = '3.1.0';
+const APP_VERSION = '3.1.1';
 const PREFS_KEY = 'konf.ui';
 const LIST_LIMIT = 40;
 const CODE_ATTRS = 'autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false"';
@@ -1695,6 +1695,7 @@ function umlagBox() {
       <button type="button" class="btn btn-secondary" id="umlag-dl">${icon.download}<span>Excel</span></button>
     </div>
     ${st.to ? `<p class="hint">Empfänger: ${esc(st.to)}</p>` : ''}
+    ${isAndroid ? '<p class="hint">Android: Die Excel-Datei wird gespeichert und die Mail-App geöffnet – dort über 📎 aus „Downloads“ anhängen.</p>' : ''}
   </div>`;
 }
 
@@ -1703,6 +1704,7 @@ async function bindUmlag(root) {
   if (!box || !$('#umlag-mail', box)) return;
   $('#umlag-mail', box).addEventListener('click', () => sendUmlagerung(true));
   $('#umlag-dl', box).addEventListener('click', () => sendUmlagerung(false));
+  prepareUmlagerung().catch((ex) => console.error(ex)); // schon vorab erzeugen → Tippen wirkt sofort
   try {
     const keys = await templateKeys();
     const missing = openOrderItems().filter((i) => !keys?.has(digits(i.nr)));
@@ -1714,42 +1716,95 @@ async function bindUmlag(root) {
   } catch (ex) { console.error(ex); }
 }
 
-async function makeUmlagerung() {
-  const items = openOrderItems();
-  const fflate = await loadFflate();
-  const { bytes, appended } = fillUmlagerung(fflate, store.umlagerungTemplate(), items, new Date());
-  const name = `Umlagerungsschein_${store.localDate()}.xlsx`;
-  return { file: new File([bytes], name, { type: XLSX_TYPE }), items, appended };
+// Chrome auf Android teilt nur bestimmte Dateitypen (Bilder, PDF, Text …) – Excel nicht.
+// canShare() meldet trotzdem „ja“, share() lehnt dann mit NotAllowedError ab. Deshalb auf Android
+// direkt: Datei speichern + Mail-App öffnen.
+const isAndroid = /Android/i.test(navigator.userAgent);
+
+let umlagReady = null; // { key, promise, value }
+const umlagKey = () => JSON.stringify([openOrderItems(), store.umlagerungSettings().uploadedAt, store.localDate()]);
+
+/** Erzeugt die Excel-Datei für die aktuelle Bestellliste (wird gemerkt, solange sich nichts ändert). */
+function prepareUmlagerung() {
+  const key = umlagKey();
+  if (umlagReady?.key !== key) {
+    const entry = { key, value: null };
+    entry.promise = (async () => {
+      const items = openOrderItems();
+      const fflate = await loadFflate();
+      const { bytes, appended } = fillUmlagerung(fflate, store.umlagerungTemplate(), items, new Date());
+      const name = `Umlagerungsschein_${store.localDate()}.xlsx`;
+      entry.value = { file: new File([bytes], name, { type: XLSX_TYPE }), items, appended };
+      return entry.value;
+    })();
+    entry.promise.catch(() => { if (umlagReady === entry) umlagReady = null; });
+    umlagReady = entry;
+  }
+  return umlagReady.promise;
 }
 
-let umlagPending = null;
+function mailText(file, items, attachHint) {
+  const st = store.umlagerungSettings();
+  const day = new Date().toLocaleDateString('de-DE');
+  const subject = `Umlagerungsschein BO-WERT ${day}`;
+  const body = `Hallo,\n\nanbei der Umlagerungsschein vom ${day} (${plural(items.length, 'Position', 'Positionen')}).\n\nViele Grüße\nBO-WERT Konfektionierung`
+    + (attachHint ? `\n\n(Bitte die Datei ${file.name} aus dem Download-Ordner anhängen.)` : '');
+  const url = `mailto:${encodeURIComponent(st.to || '').replace(/%40/g, '@')}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  return { subject, body, url };
+}
+
+/** Mail-Programm öffnen (über einen Link – funktioniert auch dort, wo location.href blockiert ist). */
+function openMailto(url) {
+  const a = Object.assign(document.createElement('a'), { href: url });
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
+function offerMarkOrdered(items, message) {
+  const ids = items.map((i) => i.entryId);
+  toast(message, 'ok', {
+    label: 'Als bestellt markieren',
+    run: () => { store.markOrdered(ids); toast('Als bestellt markiert'); },
+  });
+}
+
 async function sendUmlagerung(asMail) {
   try {
-    umlagPending ||= makeUmlagerung();
-    const { file, items } = await umlagPending;
-    umlagPending = null;
-    const st = store.umlagerungSettings();
-    const day = new Date().toLocaleDateString('de-DE');
-    const subject = `Umlagerungsschein BO-WERT ${day}`;
-    const body = `Hallo,\n\nanbei der Umlagerungsschein vom ${day} (${plural(items.length, 'Position', 'Positionen')}).\n\nViele Grüße\nBO-WERT Konfektionierung`;
-    if (asMail && matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
-      await navigator.share({ files: [file], title: subject, text: body });
-    } else {
+    // Normalerweise schon fertig → kein Warten zwischen Tippen und Teilen
+    const ready = umlagReady?.key === umlagKey() && umlagReady.value;
+    const { file, items } = ready || await prepareUmlagerung();
+    const n = plural(items.length, 'Position', 'Positionen');
+
+    if (!asMail) {
       downloadFile(file);
-      if (asMail) {
-        const to = encodeURIComponent(st.to || '');
-        location.href = `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(`${body}\n\n(Datei ${file.name} bitte anhängen – sie liegt im Download-Ordner.)`)}`;
+      offerMarkOrdered(items, `Umlagerungsschein gespeichert (${n})`);
+      return;
+    }
+    const canShareFile = !isAndroid && matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] });
+    if (canShareFile) {
+      const { subject, body } = mailText(file, items, false);
+      try {
+        await navigator.share({ files: [file], title: subject, text: body });
+        offerMarkOrdered(items, `Umlagerungsschein geteilt (${n})`);
+        return;
+      } catch (ex) {
+        if (ex.name === 'AbortError') return;
+        if (ex.name !== 'NotAllowedError') throw ex;
+        // Gerät lehnt Excel-Dateien beim Teilen ab → speichern + Mail-App über eigenen Tipp öffnen
+        downloadFile(file);
+        toast('Excel gespeichert – jetzt die Mail öffnen und die Datei anhängen.', 'ok', {
+          label: 'Mail öffnen', run: () => { openMailto(mailText(file, items, true).url); offerMarkOrdered(items, `Umlagerungsschein: ${n}`); },
+        });
+        return;
       }
     }
-    const ids = items.map((i) => i.entryId);
-    toast(`Umlagerungsschein erstellt (${plural(items.length, 'Position', 'Positionen')})`, 'ok', {
-      label: 'Als bestellt markieren',
-      run: () => { store.markOrdered(ids); toast('Als bestellt markiert'); },
-    });
+    // Android / Computer: Datei speichern und Mail-App mit Empfänger + Betreff öffnen
+    downloadFile(file);
+    const { url } = mailText(file, items, true);
+    setTimeout(() => openMailto(url), 400);
+    offerMarkOrdered(items, `Excel gespeichert – in der Mail über 📎 aus „Downloads“ anhängen`);
   } catch (ex) {
-    umlagPending = null;
-    if (ex.name === 'AbortError') return;
-    if (ex.name === 'NotAllowedError') { toast('Datei ist fertig – bitte noch einmal tippen.'); return; }
     console.error(ex);
     toast(`Umlagerungsschein fehlgeschlagen: ${ex.message}`, 'error');
   }
