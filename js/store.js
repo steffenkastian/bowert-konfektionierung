@@ -1058,7 +1058,8 @@ export async function createInvoice({ no, date, from, to, list, extraLine = '', 
   if (missing.length) throw new Error(`Preis fehlt: ${missing.join(', ')}`);
   const refs = list.map((d) => {
     const l = lastSent(d);
-    if (!l || l.legacy || deliveryChanged(d)) throw new Error(`Lieferschein ${d.no} ist noch nicht archiviert.`);
+    // v: 0 = Altbestand nur mit printedQty (ohne PDF im Archiv); nachträglich archivierte Fassungen (legacy) zählen
+    if (!l || l.v === 0 || deliveryChanged(d)) throw new Error(`Lieferschein ${d.no} ist noch nicht archiviert.`);
     const n = noteData(d);
     return { id: d.id, v: l.v, no: d.no, date: d.date, qty: n.qty, pallets: n.pallets, orderNr: n.orderNr, bestellnr: n.bestellnr };
   }).sort((a, b) => String(a.no).localeCompare(String(b.no)));

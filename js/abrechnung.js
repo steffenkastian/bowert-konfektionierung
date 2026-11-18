@@ -5,6 +5,7 @@ import * as store from './store.js';
 import { $, $$, esc, plural, natCmp, toast } from './ui.js';
 import { renderPdf } from './files.js';
 import { invoicePdf, mergePdfs, PAYMENT_TEXT } from './rechnung.js';
+import { loadFflate } from './umlagerung.js';
 
 let C = null; // Bausteine aus app.js
 
@@ -352,8 +353,9 @@ function openByMonth() {
   for (const d of store.deliveries()) {
     if (!d.no || store.invoiceOf(d) || !store.deliveryQty(d)) continue;
     const m = monthOf(d.date);
-    const g = map.get(m) || { month: m, count: 0, amount: 0, missing: false };
+    const g = map.get(m) || { month: m, count: 0, orders: new Set(), amount: 0, missing: false };
     g.count += 1;
+    g.orders.add(d.orderId);
     const p = store.priceAt(store.articleOf(d), d.date);
     if (p == null) g.missing = true; else g.amount += store.deliveryQty(d) * p;
     map.set(m, g);
@@ -364,6 +366,13 @@ function openByMonth() {
 function viewInvoices() {
   const list = store.invoices().sort((a, b) => String(b.no).localeCompare(String(a.no)));
   const open = openByMonth();
+  // Archiv nach Monat des Rechnungsdatums
+  const months = new Map();
+  for (const inv of list) {
+    const m = monthOf(inv.date);
+    if (!months.has(m)) months.set(m, []);
+    months.get(m).push(inv);
+  }
   return {
     title: 'Rechnungen',
     tab: 'rechnungen',
@@ -372,23 +381,62 @@ function viewInvoices() {
         <ul class="card list">${open.map((g) => C.row({
           href: `#/rechnung/neu?von=${monthStart(g.month)}&bis=${monthEnd(g.month)}`,
           title: esc(monthLabel(g.month)),
-          sub: esc(`${plural(g.count, 'Lieferschein', 'Lieferscheine')} · ${eur(g.amount)} netto`),
+          sub: esc(`${plural(g.orders.size, 'Auftrag', 'Aufträge')} · ${plural(g.count, 'Lieferschein', 'Lieferscheine')} · ${eur(g.amount)} netto`),
           tag: g.missing ? '<span class="tag tag-warn">Preis fehlt</span>' : '<span class="tag">abrechnen</span>',
         })).join('')}</ul>` : ''}
-      <a class="btn btn-primary btn-block" href="#/rechnung/neu">${C.icon.plus}<span>Neue Rechnung</span></a>
-      ${C.sectionTitle('Archiv', list.length)}
-      ${list.length ? `<ul class="card list">${list.map((inv) => C.row({
-        href: `#/rechnung/${inv.id}`,
-        title: `${inv.type === 'storno' ? 'Storno ' : ''}Nr. ${esc(invNo(inv.no))}`,
-        sub: esc(`${C.fmtDay(inv.date)} · ${C.fmtDay(inv.from)}–${C.fmtDay(inv.to)} · ${eur(inv.brutto)}`),
-        tag: STATUS_TAG(inv),
-      })).join('')}</ul>` : '<p class="hint">Noch keine Rechnungen erstellt.</p>'}`,
+      <a class="btn btn-primary btn-block" href="#/rechnung/neu">${C.icon.plus}<span>Rechnungen erstellen</span></a>
+      <div id="inv-archive">${list.length ? [...months.entries()].map(([m, invs]) => `
+        ${C.sectionTitle(monthLabel(m), invs.length, `<button type="button" class="link-btn" data-zip="${m}">${C.icon.download}<span>ZIP</span></button>`)}
+        <ul class="card list">${invs.map((inv) => C.row({
+          href: `#/rechnung/${inv.id}`,
+          title: `${inv.type === 'storno' ? 'Storno ' : ''}Nr. ${esc(invNo(inv.no))}`,
+          sub: esc(`${inv.orderNrs.length === 1 ? `Auftrag ${inv.orderNrs[0]}` : `${inv.orderNrs.length} Aufträge`} · ${C.fmtDay(inv.date)} · ${eur(inv.brutto)}`),
+          tag: STATUS_TAG(inv),
+        })).join('')}</ul>`).join('')
+        : `${C.sectionTitle('Archiv', 0)}<p class="hint">Noch keine Rechnungen erstellt.</p>`}</div>`,
+    mount(root) {
+      // am eigenen Container (nicht an #main), sonst sammeln sich beim Neuzeichnen alte Klick-Handler an
+      $('#inv-archive', root).addEventListener('click', async (e) => {
+        const b = e.target.closest('[data-zip]');
+        if (!b || b.disabled) return;
+        const invs = months.get(b.dataset.zip) || [];
+        const label = b.innerHTML;
+        b.disabled = true;
+        try {
+          const file = await zipInvoices(invs, `Rechnungen_${b.dataset.zip}.zip`, (i) => { b.innerHTML = `<span class="spinner small"></span><span>${i}/${invs.length}</span>`; });
+          await C.shareOrDownload(file);
+        } catch (ex) {
+          if (ex.name !== 'AbortError') toast(`ZIP fehlgeschlagen: ${ex.message}`, 'error');
+        } finally { if (b.isConnected) { b.disabled = false; b.innerHTML = label; } }
+      });
+    },
   };
 }
 
-// ---------- Neue Rechnung ----------
+// ---------- Rechnungen erstellen: je Auftrag eine ----------
 
-const needsArchive = (d) => { const l = store.lastSent(d); return !l || l.legacy || store.deliveryChanged(d); };
+/** Aktuelle Fassung noch nicht im Archiv (v: 0 = Altbestand nur mit printedQty). */
+const needsArchive = (d) => { const l = store.lastSent(d); return !l || l.v === 0 || store.deliveryChanged(d); };
+
+/** Offene Lieferscheine des Zeitraums je Auftrag, mit Rechnungsdaten und Problemen. */
+function orderBatches(notes) {
+  const byOrder = new Map();
+  for (const d of notes) {
+    if (!byOrder.has(d.orderId)) byOrder.set(d.orderId, []);
+    byOrder.get(d.orderId).push(d);
+  }
+  return [...byOrder.entries()].map(([orderId, list]) => {
+    const calc = store.buildInvoice(list);
+    const order = store.getOrder(orderId);
+    const n0 = store.noteData(list[0]);
+    return {
+      orderId, order, list, calc, nr: n0.orderNr, bestellnr: n0.bestellnr,
+      article: store.getArticle(store.articleOf(list[0])),
+      qty: list.reduce((s, d) => s + store.deliveryQty(d), 0),
+      ok: calc.missing.length === 0,
+    };
+  }).sort((a, b) => natCmp(a.nr, b.nr));
+}
 
 function viewInvoiceNew(query) {
   const params = new URLSearchParams(query || '');
@@ -397,19 +445,13 @@ function viewInvoiceNew(query) {
   const from = C.isIsoDate(params.get('von')) ? params.get('von') : monthStart(prev);
   const to = C.isIsoDate(params.get('bis')) ? params.get('bis') : monthEnd(prev);
   const { notes, withoutNo } = store.billable(from, to);
-  const excluded = new Set((params.get('ohne') || '').split(',').filter(Boolean));
-  const byOrder = new Map();
-  for (const d of notes) {
-    const k = d.orderId;
-    if (!byOrder.has(k)) byOrder.set(k, []);
-    byOrder.get(k).push(d);
-  }
-  const groups = [...byOrder.entries()].sort((a, b) => natCmp(store.noteData(a[1][0]).orderNr, store.noteData(b[1][0]).orderNr));
+  const batches = orderBatches(notes);
+  const blocked = batches.filter((b) => !b.ok);
   const defDate = to < today ? to : today;
   const quick = (label, f, t) => `<a class="filter-chip${f === from && t === to ? ' is-on' : ''}" href="#/rechnung/neu?von=${f}&bis=${t}">${esc(label)}</a>`;
 
   const view = {
-    title: 'Neue Rechnung',
+    title: 'Rechnungen erstellen',
     back: '#/rechnungen',
     tab: 'rechnungen',
     form: true,
@@ -427,36 +469,37 @@ function viewInvoiceNew(query) {
       ${withoutNo.length ? `<p class="notice">${plural(withoutNo.length, 'Lieferung', 'Lieferungen')} ohne Lieferschein
         (${C.fmtN(withoutNo.reduce((s, d) => s + store.deliveryQty(d), 0))} Satz) – wird nicht berechnet. Erst den Lieferschein erstellen:
         ${[...new Set(withoutNo.map((d) => d.date))].map((d) => `<a href="#/lieferscheine?datum=${d}">${C.fmtDay(d)}</a>`).join(', ')}</p>` : ''}
-      ${notes.length ? `
-        ${C.sectionTitle('Lieferscheine', notes.length)}
+      ${blocked.length ? `<p class="notice">${plural(blocked.length, 'Auftrag wird', 'Aufträge werden')} übersprungen – Preis fehlt:
+        ${[...new Map(blocked.map((b) => [b.article?.id, b.article])).values()].map((a) => (a ? `<a href="#/artikel/${a.id}">${esc(a.name)}</a>` : 'ohne Artikel')).join(', ')}</p>` : ''}
+      ${batches.length ? `
+        ${C.sectionTitle('Je Auftrag eine Rechnung', batches.length)}
         <div class="card pick-list" id="pick">
-          ${groups.map(([orderId, list]) => {
-            const n0 = store.noteData(list[0]);
-            const a = store.getArticle(store.articleOf(list[0]));
-            return `<div class="pick-group">
-              <label class="pick-head"><input type="checkbox" data-group="${esc(orderId)}">
-                <span><b>Auftrag ${esc(n0.orderNr)}</b><small>${esc([a?.name, n0.bestellnr ? `Bestellnr. ${n0.bestellnr}` : 'ohne Bestellnr.'].filter(Boolean).join(' · '))}</small></span></label>
-              ${list.map((d) => `<label class="pick-row"><input type="checkbox" data-d="${esc(d.id)}" data-order="${esc(orderId)}" ${excluded.has(d.id) ? '' : 'checked'}>
-                <span class="pick-main"><b>Nr. ${esc(d.no)}</b><small>${C.fmtDay(d.date)} · ${C.fmtN(store.deliveryQty(d))} Satz</small></span>
-                ${needsArchive(d) ? `<span class="tag ${store.deliveryState(d) === 'geaendert' ? 'tag-warn' : ''}">${store.deliveryState(d) === 'geaendert' ? 'geändert' : 'nicht verschickt'}</span>` : ''}</label>`).join('')}
-            </div>`;
-          }).join('')}
+          <label class="pick-head"><input type="checkbox" id="all"><span><b>Alle auswählen</b></span></label>
+          ${batches.map((b) => `<div class="pick-order${b.ok ? '' : ' is-blocked'}">
+            <label class="pick-row pick-row2"><input type="checkbox" data-o="${esc(b.orderId)}" ${b.ok ? 'checked' : 'disabled'}>
+              <span class="pick-main"><b>Auftrag ${esc(b.nr)}</b>
+                <small>${esc(b.article?.name || 'ohne Artikel')} · ${b.bestellnr ? `Bestellnr. ${esc(b.bestellnr)}` : '<span class="warn-text">ohne Bestellnr.</span>'}</small>
+                <small>${esc(`${plural(b.list.length, 'Lieferschein', 'Lieferscheine')} (${b.list.map((d) => d.no).join(', ')})`)}</small>
+                ${b.ok ? '' : `<small class="warn-text">Preis fehlt${b.article ? ` – <a href="#/artikel/${b.article.id}">eintragen</a>` : ''}</small>`}</span>
+              <span class="pick-sum"><b>${b.ok ? eur(b.calc.netto) : '–'}</b><small>${C.fmtN(b.qty)} Satz</small></span></label>
+            ${b.ok ? `<button type="button" class="icon-btn small" data-prev="${esc(b.orderId)}" aria-label="Vorschau Auftrag ${esc(b.nr)}" title="Vorschau">${C.icon.pdf}</button>` : ''}
+          </div>`).join('')}
         </div>
         <div id="calc"></div>
         <form class="card form" id="f" novalidate>
           <div class="two-col">
-            ${C.field({ id: 'no', label: 'Rechnungsnummer', value: store.nextInvoiceNo(), attrs: 'inputmode="numeric" autocomplete="off"' })}
+            ${C.field({ id: 'no', label: 'Erste Rechnungsnummer', value: store.nextInvoiceNo(), attrs: 'inputmode="numeric" autocomplete="off"' })}
             <div class="field"><label for="date">Rechnungsdatum</label><input id="date" class="input" type="date" value="${defDate}"></div>
           </div>
-          <p class="hint" style="margin-top:-8px">Nummer bitte prüfen – derselbe Nummernkreis wird auch für andere BO-WERT-Rechnungen benutzt.</p>
+          <p class="hint" id="no-hint" style="margin-top:-8px"></p>
           <div class="field" style="margin-top:14px"><label for="extra">Zeile über den Positionen <span class="opt">optional</span></label>
             <input id="extra" class="input" autocomplete="off" placeholder="z. B. Abrechnungsmonat: ${esc(monthLabel(monthOf(from)))}"></div>
           <div class="field"><label for="note">Hinweis unter der Rechnung <span class="opt">optional</span></label>
             <textarea id="note" class="input textarea" rows="2" placeholder="z. B. Preiserhöhung …"></textarea>
             <p class="hint">Darüber steht immer: „${esc(PAYMENT_TEXT)}“</p></div>
           <p class="form-error" id="err" role="alert"></p>
-          <button class="btn btn-primary btn-block" type="submit" id="create">${C.icon.check}<span>Rechnung erstellen & herunterladen</span></button>
-          <button class="btn btn-secondary btn-block" type="button" id="preview">Vorschau</button>
+          <button class="btn btn-primary btn-block" type="submit" id="create">${C.icon.check}<span>Rechnungen erstellen</span></button>
+          <p class="hint center" id="create-hint" style="margin:10px 8px 0"></p>
         </form>
         <div id="pdf-box" class="file-view is-pdf" hidden></div>`
       : C.emptyBox('Nichts abzurechnen', `Im Zeitraum ${C.fmtDay(from)} – ${C.fmtDay(to)} gibt es keine offenen Lieferscheine.`)}`,
@@ -468,68 +511,56 @@ function viewInvoiceNew(query) {
       };
       $('#von', root).addEventListener('change', range);
       $('#bis', root).addEventListener('change', range);
-      if (!notes.length) return;
+      if (!batches.length) return;
 
-      const selected = () => $$('[data-d]', root).filter((c) => c.checked).map((c) => store.getDelivery(c.dataset.d)).filter(Boolean);
-      const draft = () => {
-        const list = selected();
-        const calc = store.buildInvoice(list);
-        return {
-          list, calc,
-          inv: {
-            no: $('#no', root).value.replace(/\D/g, ''), type: 'rechnung', date: $('#date', root).value, from, to,
-            extraLine: $('#extra', root).value.trim(), note: $('#note', root).value.trim(), ...calc,
-          },
-        };
-      };
-      const syncGroups = () => {
-        for (const g of $$('[data-group]', root)) {
-          const rows = $$(`[data-order="${CSS.escape(g.dataset.group)}"]`, root);
-          const n = rows.filter((r) => r.checked).length;
-          g.checked = n === rows.length;
-          g.indeterminate = n > 0 && n < rows.length;
-        }
-      };
-      const drawCalc = () => {
-        const { list, calc } = draft();
-        const archive = list.filter(needsArchive);
-        $('#calc', root).innerHTML = `
-          ${calc.missing.length ? `<p class="notice">Preis fehlt für: ${calc.missing.map(esc).join(', ')} – <a href="#/preise">Preise pflegen</a></p>` : ''}
-          ${C.sectionTitle('Positionen', calc.items.length)}
-          <div class="card table-card"><table class="tbl">
-            <thead><tr><th>Text</th><th class="num">Satz</th><th class="num">Betrag</th></tr></thead>
-            <tbody>${calc.items.map((i) => `<tr><td>${esc(i.text)}<small>${priceText(i.price)} pro Satz</small></td>
-              <td class="num">${C.fmtN(i.qty)}</td><td class="num">${eur(i.total)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">Nichts ausgewählt</td></tr>'}</tbody>
-            <tfoot>
-              <tr class="sub"><td colspan="2">Netto</td><td class="num">${eur(calc.netto)}</td></tr>
-              <tr class="sub"><td colspan="2">zzgl. 19 % USt.</td><td class="num">${eur(calc.ust)}</td></tr>
-              <tr><td colspan="2">Gesamtbetrag</td><td class="num">${eur(calc.brutto)}</td></tr>
-            </tfoot></table></div>
-          <p class="hint" style="margin:0 4px 14px">${plural(list.length, 'Lieferschein', 'Lieferscheine')} hängen hinter der Rechnung
-            · Lieferdatum ${C.fmtDay(calc.lieferdatum)}${calc.orderNrs.length > 1 ? ` · ${calc.orderNrs.length} Aufträge` : ''}
-            ${archive.length ? ` · ${plural(archive.length, 'Lieferschein wird', 'Lieferscheine werden')} in der aktuellen Fassung archiviert (noch nicht verschickt bzw. geändert)` : ''}</p>`;
-        $('#create', root).disabled = !list.length || calc.missing.length > 0;
+      const chosen = () => batches.filter((b) => $(`[data-o="${CSS.escape(b.orderId)}"]`, root)?.checked);
+      const startNo = () => Number($('#no', root).value.replace(/\D/g, '')) || 0;
+      const fields = () => ({
+        date: $('#date', root).value, from, to,
+        extraLine: $('#extra', root).value.trim(), note: $('#note', root).value.trim(),
+      });
+      const draw = () => {
+        const list = chosen();
+        const okAll = batches.filter((b) => b.ok);
+        const all = $('#all', root);
+        all.checked = list.length === okAll.length && okAll.length > 0;
+        all.indeterminate = list.length > 0 && list.length < okAll.length;
+        const netto = store.round2(list.reduce((s, b) => s + b.calc.netto, 0));
+        const brutto = store.round2(list.reduce((s, b) => s + b.calc.brutto, 0));
+        $('#calc', root).innerHTML = `<div class="card kpis calc-sum">
+          <div class="kpi"><span>Rechnungen</span><b>${list.length}</b></div>
+          <div class="kpi"><span>Netto / Brutto</span><b>${eur(netto)}</b><small>${eur(brutto)} brutto</small></div></div>`;
+        const s = startNo();
+        $('#no-hint', root).textContent = list.length && String(s).length === 8
+          ? `Nummern ${invNo(s)}${list.length > 1 ? ` – ${invNo(s + list.length - 1)}` : ''} (in der Reihenfolge der Aufträge). Bitte prüfen – derselbe Nummernkreis wird auch für andere BO-WERT-Rechnungen benutzt.`
+          : 'Bitte prüfen – derselbe Nummernkreis wird auch für andere BO-WERT-Rechnungen benutzt.';
+        const btn = $('#create', root);
+        btn.disabled = !list.length;
+        btn.innerHTML = `${C.icon.check}<span>${list.length === 1 ? 'Rechnung erstellen & herunterladen' : `${list.length || ''} Rechnungen erstellen & als ZIP herunterladen`}</span>`;
+        $('#create-hint', root).textContent = list.length ? `Je Rechnung eine PDF: Rechnung + Lieferscheine des Auftrags.` : 'Bitte mindestens einen Auftrag auswählen.';
       };
       $('#pick', root).addEventListener('change', (e) => {
-        const g = e.target.closest('[data-group]');
-        if (g) $$(`[data-order="${CSS.escape(g.dataset.group)}"]`, root).forEach((c) => { c.checked = g.checked; });
-        syncGroups();
-        drawCalc();
+        if (e.target.id === 'all') $$('[data-o]', root).forEach((c) => { if (!c.disabled) c.checked = e.target.checked; });
+        draw();
       });
-      syncGroups();
-      drawCalc();
+      $('#no', root).addEventListener('input', draw);
+      draw();
 
+      // Vorschau einer einzelnen Rechnung (nur die Rechnungsseite)
       const box = $('#pdf-box', root);
-      $('#preview', root).addEventListener('click', async () => {
-        const { inv, calc } = draft();
-        if (!calc.items.length) return;
+      $('#pick', root).addEventListener('click', async (e) => {
+        const p = e.target.closest('[data-prev]');
+        if (!p) return;
+        const b = batches.find((x) => x.orderId === p.dataset.prev);
+        const idx = Math.max(0, chosen().indexOf(b));
         box.hidden = false;
         box.innerHTML = '<div class="loading"><span class="spinner"></span>Vorschau wird erstellt …</div>';
+        box.scrollIntoView({ behavior: 'smooth', block: 'start' });
         try {
-          const bytes = await invoicePdf({ ...inv, no: inv.no || '00000000' });
-          box.innerHTML = '<p class="archive-label">Vorschau (nur Rechnungsseite)</p>';
+          const bytes = await invoicePdf({ no: String(startNo() + idx).padStart(8, '0'), type: 'rechnung', ...fields(), ...b.calc });
+          if (C.currentView() !== view) return;
+          box.innerHTML = `<p class="archive-label">Vorschau Auftrag ${esc(b.nr)} (nur Rechnungsseite)</p>`;
           await renderPdf(new Blob([bytes], { type: 'application/pdf' }), box, () => C.currentView() === view);
-          box.scrollIntoView({ behavior: 'smooth', block: 'start' });
         } catch (ex) { box.innerHTML = `<p class="empty-inline pad">${esc(ex.message)}</p>`; }
       });
 
@@ -538,27 +569,50 @@ function viewInvoiceNew(query) {
         const btn = $('#create', root);
         const err = $('#err', root);
         err.textContent = '';
-        const label = btn.innerHTML;
+        const list = chosen();
+        if (!list.length) { err.textContent = 'Bitte mindestens einen Auftrag auswählen.'; return; }
+        const progress = (t) => { btn.innerHTML = `<span class="spinner small"></span><span>${esc(t)}</span>`; };
         btn.disabled = true;
-        btn.innerHTML = '<span class="spinner small"></span><span>Wird erstellt …</span>';
+        const created = [];
         try {
-          const { list, inv } = draft();
-          store.checkInvoiceNo(inv.no);
-          // Lieferscheine, deren aktuelle Fassung noch nicht im Archiv liegt, jetzt archivieren
-          const toArchive = list.filter(needsArchive);
-          if (toArchive.length) await store.archiveNotes(await Promise.all(toArchive.map(C.notePdf)), '');
-          const created = await store.createInvoice({ ...inv, list });
-          const file = await invoiceFile(created);
-          await C.shareOrDownload(file, { title: file.name.replace(/\.pdf$/, '') });
-          toast(`Rechnung ${invNo(created.no)} erstellt`);
-          C.replace(`#/rechnung/${created.id}`);
+          const start = startNo();
+          for (let i = 0; i < list.length; i++) store.checkInvoiceNo(start + i); // alle Nummern frei?
+          // Lieferscheine, deren aktuelle Fassung noch nicht im Archiv liegt, zuerst archivieren
+          const toArchive = list.flatMap((b) => b.list).filter(needsArchive);
+          for (let i = 0; i < toArchive.length; i += 40) {
+            progress(`Lieferscheine archivieren … ${Math.min(i + 40, toArchive.length)}/${toArchive.length}`);
+            await store.archiveNotes(await Promise.all(toArchive.slice(i, i + 40).map(C.notePdf)), '');
+          }
+          for (let i = 0; i < list.length; i++) {
+            progress(`Rechnung ${i + 1} von ${list.length} …`);
+            const inv = await store.createInvoice({ no: String(start + i), ...fields(), list: list[i].list });
+            const bytes = await invoicePdf(inv);
+            pageCache.set(inv.id, bytes);
+            await store.saveInvoicePdf(inv.id, bytes);
+            created.push(inv);
+          }
         } catch (ex) {
-          if (ex.name === 'AbortError') return;
           console.error(ex);
-          err.textContent = ex.message;
-        } finally {
-          if (btn.isConnected) { btn.disabled = false; btn.innerHTML = label; }
+          err.textContent = created.length
+            ? `Nach ${plural(created.length, 'Rechnung', 'Rechnungen')} abgebrochen: ${ex.message}`
+            : ex.message;
         }
+        if (created.length) {
+          try {
+            const file = created.length === 1
+              ? await invoiceFile(created[0])
+              : await zipInvoices(created, `Rechnungen_${from}_${to}.zip`, (i) => progress(`ZIP wird erstellt … ${i}/${created.length}`));
+            await C.shareOrDownload(file, { title: file.name.replace(/\.(pdf|zip)$/, '') });
+          } catch (ex) {
+            if (ex.name !== 'AbortError') toast(`Download fehlgeschlagen: ${ex.message} – die Rechnungen sind gespeichert.`, 'error');
+          }
+          toast(created.length === 1 ? `Rechnung ${invNo(created[0].no)} erstellt`
+            : `${created.length} Rechnungen erstellt (${invNo(created[0].no)} – ${invNo(created[created.length - 1].no)})`);
+          if (!err.textContent) C.replace(created.length === 1 ? `#/rechnung/${created[0].id}` : '#/rechnungen');
+          else C.replace(`#/rechnung/neu?von=${from}&bis=${to}`);
+          return;
+        }
+        draw();
       });
     },
   };
@@ -567,10 +621,14 @@ function viewInvoiceNew(query) {
 
 // ---------- PDF: Rechnung (+ Lieferscheine) ----------
 
-const fileName = (inv) => `${inv.type === 'storno' ? 'Stornorechnung' : 'Rechnung'}_${String(inv.no).slice(0, 4)}-${String(inv.no).slice(4)}.pdf`;
+const fileName = (inv) => `${inv.type === 'storno' ? 'Stornorechnung' : 'Rechnung'}_${String(inv.no).slice(0, 4)}-${String(inv.no).slice(4)}`
+  + `${inv.orderNrs?.length === 1 ? `_${inv.orderNrs[0]}` : ''}.pdf`;
+
+const pageCache = new Map(); // gerade erzeugte Rechnungsseiten (spart das Nachladen beim ZIP)
 
 /** Rechnungsseite aus dem Archiv – fehlt sie (z. B. Abbruch beim Erstellen), aus den eingefrorenen Daten erzeugen und ablegen. */
 async function invoicePage(inv) {
+  if (pageCache.has(inv.id)) return pageCache.get(inv.id);
   let bytes = await store.loadInvoicePdf(inv.id).catch(() => null);
   if (!bytes) {
     const ref = inv.refNo ? store.getInvoice(inv.refNo) : null;
@@ -588,6 +646,18 @@ async function invoiceFile(inv) {
   }
   const bytes = parts.length > 1 ? await mergePdfs(parts) : parts[0];
   return new File([bytes], fileName(inv), { type: 'application/pdf' });
+}
+
+/** Mehrere Rechnungen (je eine PDF mit Lieferscheinen) als ZIP. */
+async function zipInvoices(invs, name, onProgress = () => {}) {
+  const fflate = await loadFflate();
+  const entries = {};
+  for (let i = 0; i < invs.length; i++) {
+    onProgress(i + 1);
+    const f = await invoiceFile(invs[i]);
+    entries[f.name] = [new Uint8Array(await f.arrayBuffer()), { level: 0 }];
+  }
+  return new File([fflate.zipSync(entries)], name, { type: 'application/zip' });
 }
 
 // ---------- Eine Rechnung ----------
