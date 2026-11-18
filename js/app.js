@@ -9,7 +9,7 @@ import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 import { deliveryPdf } from './lieferschein.js';
 import { fillUmlagerung, readTemplate, loadFflate, digits } from './umlagerung.js';
 
-const APP_VERSION = '3.3.0';
+const APP_VERSION = '3.3.1';
 const PREFS_KEY = 'konf.ui';
 const LIST_LIMIT = 40;
 const CODE_ATTRS = 'autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false"';
@@ -1329,21 +1329,39 @@ function downloadFile(file) {
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
 
+// Chrome auf Android teilt nur bestimmte Dateitypen (PDF, Bilder, Text/CSV …) – z. B. kein JSON und kein
+// Excel. canShare() meldet trotzdem „ja“, share() lehnt dann mit NotAllowedError („permission denied“) ab.
+const isAndroid = /Android/i.test(navigator.userAgent);
+const SHAREABLE_ON_ANDROID = /\.(pdf|csv|txt|jpe?g|png|gif|webp|bmp)$/i;
+
+/**
+ * Datei am Handy teilen, sonst (Computer, nicht teilbarer Typ, Teilen abgelehnt) herunterladen.
+ * Gibt 'shared' oder 'downloaded' zurück; ein Abbruch durch den Nutzer wird als AbortError weitergegeben.
+ */
+async function shareOrDownload(file, { title = file.name, text } = {}) {
+  const allowed = !isAndroid || SHAREABLE_ON_ANDROID.test(file.name);
+  if (allowed && matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title, ...(text ? { text } : {}) });
+      return 'shared';
+    } catch (ex) {
+      if (ex.name !== 'NotAllowedError') throw ex;
+    }
+  }
+  downloadFile(file);
+  return 'downloaded';
+}
+
 async function sharePdf(list) {
   if (!list.length) return;
   try {
     const file = await pdfFile(list);
-    if (matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
-      await navigator.share({ files: [file], title: file.name.replace(/\.pdf$/, '').replace(/_/g, ' ') });
-    } else {
-      downloadFile(file);
-    }
+    await shareOrDownload(file, { title: file.name.replace(/\.pdf$/, '').replace(/_/g, ' ') });
     // Geteilte/gedruckte Fassung archivieren (nur was noch nicht in dieser Fassung verschickt war)
     const fresh = list.filter((d) => ['erstellt', 'geaendert'].includes(store.deliveryState(d)));
     if (fresh.length) store.archiveNotes(await Promise.all(fresh.map(notePdf)), '');
   } catch (ex) {
     if (ex.name === 'AbortError') return;
-    if (ex.name === 'NotAllowedError') { toast('PDF ist fertig – bitte noch einmal tippen.'); return; }
     console.error(ex);
     toast(`PDF fehlgeschlagen: ${ex.message}`, 'error');
   }
@@ -1758,9 +1776,7 @@ function viewDeliveryList(query) {
         const csv = `﻿${[head, ...rows].map((r) => r.map(cell).join(';')).join('\r\n')}`;
         const name = `lieferscheine-${store.localDate()}.csv`;
         const file = new File([csv], name, { type: 'text/csv' });
-        if (matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
-          navigator.share({ files: [file], title: 'Lieferscheine' }).catch(() => {});
-        } else downloadFile(file);
+        shareOrDownload(file, { title: 'Lieferscheine' }).catch(() => {});
       });
       draw();
       return draw;
@@ -1839,10 +1855,7 @@ async function bindUmlag(root) {
   } catch (ex) { console.error(ex); }
 }
 
-// Chrome auf Android teilt nur bestimmte Dateitypen (Bilder, PDF, Text …) – Excel nicht.
-// canShare() meldet trotzdem „ja“, share() lehnt dann mit NotAllowedError ab. Deshalb auf Android
-// direkt: Datei speichern + Mail-App öffnen.
-const isAndroid = /Android/i.test(navigator.userAgent);
+// Excel lässt sich auf Android nicht teilen (siehe shareOrDownload) → dort: speichern + Mail-App öffnen.
 
 let umlagReady = null; // { key, promise, value }
 const umlagKey = () => JSON.stringify([openOrderItems(), store.umlagerungSettings().uploadedAt, store.localDate()]);
@@ -2073,14 +2086,7 @@ function viewFile(articleId, fileId) {
       $('#share', root).addEventListener('click', async () => {
         if (!file) return;
         try {
-          if (matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
-            await navigator.share({ files: [file], title: file.name });
-          } else {
-            const link = Object.assign(document.createElement('a'), { href: url, download: file.name });
-            document.body.append(link);
-            link.click();
-            link.remove();
-          }
+          await shareOrDownload(file);
         } catch (ex) {
           if (ex.name !== 'AbortError') toast(`Teilen nicht möglich: ${ex.message}`, 'error');
         }
@@ -2521,16 +2527,8 @@ async function exportBackup() {
   const name = `konfektionierung-${new Date().toISOString().slice(0, 10)}.json`;
   const file = new File([store.exportJSON()], name, { type: 'application/json' });
   try {
-    if (matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
-      await navigator.share({ files: [file], title: 'Konfektionierung – Sicherung' });
-    } else {
-      const url = URL.createObjectURL(file);
-      const link = Object.assign(document.createElement('a'), { href: url, download: name });
-      document.body.append(link);
-      link.click();
-      link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 10_000);
-    }
+    const how = await shareOrDownload(file, { title: 'Konfektionierung – Sicherung' });
+    if (how === 'downloaded') toast(`Sicherung gespeichert: ${name} (Ordner „Downloads“)`);
   } catch (ex) {
     if (ex.name !== 'AbortError') toast(`Sicherung fehlgeschlagen: ${ex.message}`, 'error');
   }
