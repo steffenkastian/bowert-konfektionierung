@@ -1,7 +1,7 @@
 // Service Worker: hält die App-Dateien offline verfügbar (Lager mit schlechtem Empfang).
 // Die Daten selbst cacht Firebase (Firestore-Offline-Cache) – Anfragen an Firebase laufen hier nicht durch.
 // Bei jeder neuen Version CACHE hochzählen, damit installierte Apps die neuen Dateien laden.
-const CACHE = 'konf-v6';
+const CACHE = 'konf-v7';
 const FIREBASE = 'https://www.gstatic.com/firebasejs/10.12.2/';
 const ASSETS = [
   './',
@@ -13,6 +13,7 @@ const ASSETS = [
   './js/config.js',
   './js/files.js',
   './js/lieferschein.js',
+  './js/umlagerung.js',
   './manifest.webmanifest',
   './icons/icon.svg',
   './icons/icon-192.png',

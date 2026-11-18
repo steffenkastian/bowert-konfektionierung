@@ -695,6 +695,31 @@ export function markPrinted(ids) {
   if (any) { run(batch.commit()); emit(); }
 }
 
+// ---------- Umlagerungsschein ----------
+// settings/umlagerung { xlsx: Bytes, name, size, uploadedAt, to }  – Excel-Vorlage + Mail-Empfänger
+
+export const umlagerungSettings = () => data.settings.get('umlagerung') || {};
+export function umlagerungTemplate() {
+  const x = umlagerungSettings().xlsx;
+  return x?.toUint8Array ? x.toUint8Array() : null;
+}
+
+export function saveUmlagerungTemplate(bytes, name) {
+  if (bytes.length > 900_000) throw new Error('Die Vorlage ist zu groß (max. 900 KB).');
+  const fields = { xlsx: Bytes.fromUint8Array(bytes), name: str(name) || 'Vorlage.xlsx', size: bytes.length, uploadedAt: now() };
+  run(setDoc(doc(db, 'settings', 'umlagerung'), fields, { merge: true }));
+  data.settings.set('umlagerung', { ...umlagerungSettings(), id: 'umlagerung', ...fields });
+  emit();
+}
+
+export function setUmlagerungMail(to) {
+  to = str(to);
+  if (to && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) throw new Error('Bitte eine gültige E-Mail-Adresse eingeben.');
+  run(setDoc(doc(db, 'settings', 'umlagerung'), { to, updatedAt: now() }, { merge: true }));
+  data.settings.set('umlagerung', { ...umlagerungSettings(), id: 'umlagerung', to });
+  emit();
+}
+
 // ---------- Export ----------
 
 export function exportJSON() {

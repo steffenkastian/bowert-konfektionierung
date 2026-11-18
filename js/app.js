@@ -7,8 +7,9 @@ import {
 } from './ui.js';
 import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 import { deliveryPdf } from './lieferschein.js';
+import { fillUmlagerung, readTemplate, loadFflate, digits } from './umlagerung.js';
 
-const APP_VERSION = '3.0.0';
+const APP_VERSION = '3.1.0';
 const PREFS_KEY = 'konf.ui';
 const LIST_LIMIT = 40;
 const CODE_ATTRS = 'autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false"';
@@ -1652,6 +1653,121 @@ function viewDeliveryList(query) {
   };
 }
 
+
+// ======================================================================
+// Umlagerungsschein (aus der Bestellliste)
+// ======================================================================
+
+const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+let templateInfo = { key: null, keys: null };
+
+/** Teile-Nummern der Vorlage (zum Anzeigen, was zugeordnet wird). Lädt das ZIP-Modul bei Bedarf. */
+async function templateKeys() {
+  const st = store.umlagerungSettings();
+  const bytes = store.umlagerungTemplate();
+  if (!bytes) return null;
+  if (templateInfo.key !== st.uploadedAt) {
+    const { rows } = readTemplate(await loadFflate(), bytes);
+    templateInfo = { key: st.uploadedAt, keys: new Set(rows.map((r) => digits(r.nr)).filter(Boolean)) };
+  }
+  return templateInfo.keys;
+}
+
+const openOrderItems = () => store.orderlist()
+  .filter((e) => e.status === 'offen' && store.getMaterial(e.materialId))
+  .map((e) => { const m = store.getMaterial(e.materialId); return { entryId: e.id, nr: m.nr, description: m.description || '', qty: e.qty || 1 }; });
+
+function umlagBox() {
+  const items = openOrderItems();
+  if (!items.length) return '';
+  const st = store.umlagerungSettings();
+  if (!store.umlagerungTemplate()) {
+    return `<div class="card box umlag"><p><b>Umlagerungsschein</b> – die Excel-Vorlage fehlt noch.
+      <a href="#/mehr">Unter ⚙ Mehr hochladen</a>.</p></div>`;
+  }
+  const pallets = items.reduce((s, i) => s + i.qty, 0);
+  return `<div class="card box umlag">
+    <div class="umlag-head">${icon.download}<div><b>Umlagerungsschein</b>
+      <span>${plural(items.length, 'Position', 'Positionen')} · ${plural(pallets, 'Palette', 'Paletten')} <span class="muted">(Menge = Anzahl Paletten)</span></span></div></div>
+    <p class="umlag-missing" id="umlag-missing" hidden></p>
+    <div class="btn-row2">
+      <button type="button" class="btn btn-primary" id="umlag-mail">${icon.share}<span>Per Mail senden</span></button>
+      <button type="button" class="btn btn-secondary" id="umlag-dl">${icon.download}<span>Excel</span></button>
+    </div>
+    ${st.to ? `<p class="hint">Empfänger: ${esc(st.to)}</p>` : ''}
+  </div>`;
+}
+
+async function bindUmlag(root) {
+  const box = $('.umlag', root);
+  if (!box || !$('#umlag-mail', box)) return;
+  $('#umlag-mail', box).addEventListener('click', () => sendUmlagerung(true));
+  $('#umlag-dl', box).addEventListener('click', () => sendUmlagerung(false));
+  try {
+    const keys = await templateKeys();
+    const missing = openOrderItems().filter((i) => !keys?.has(digits(i.nr)));
+    const p = $('#umlag-missing', box);
+    if (p && missing.length) {
+      p.hidden = false;
+      p.textContent = `Nicht in der Vorlage, wird unten angehängt: ${missing.map((i) => i.nr).join(', ')}`;
+    }
+  } catch (ex) { console.error(ex); }
+}
+
+async function makeUmlagerung() {
+  const items = openOrderItems();
+  const fflate = await loadFflate();
+  const { bytes, appended } = fillUmlagerung(fflate, store.umlagerungTemplate(), items, new Date());
+  const name = `Umlagerungsschein_${store.localDate()}.xlsx`;
+  return { file: new File([bytes], name, { type: XLSX_TYPE }), items, appended };
+}
+
+let umlagPending = null;
+async function sendUmlagerung(asMail) {
+  try {
+    umlagPending ||= makeUmlagerung();
+    const { file, items } = await umlagPending;
+    umlagPending = null;
+    const st = store.umlagerungSettings();
+    const day = new Date().toLocaleDateString('de-DE');
+    const subject = `Umlagerungsschein BO-WERT ${day}`;
+    const body = `Hallo,\n\nanbei der Umlagerungsschein vom ${day} (${plural(items.length, 'Position', 'Positionen')}).\n\nViele Grüße\nBO-WERT Konfektionierung`;
+    if (asMail && matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
+      await navigator.share({ files: [file], title: subject, text: body });
+    } else {
+      downloadFile(file);
+      if (asMail) {
+        const to = encodeURIComponent(st.to || '');
+        location.href = `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(`${body}\n\n(Datei ${file.name} bitte anhängen – sie liegt im Download-Ordner.)`)}`;
+      }
+    }
+    const ids = items.map((i) => i.entryId);
+    toast(`Umlagerungsschein erstellt (${plural(items.length, 'Position', 'Positionen')})`, 'ok', {
+      label: 'Als bestellt markieren',
+      run: () => { store.markOrdered(ids); toast('Als bestellt markiert'); },
+    });
+  } catch (ex) {
+    umlagPending = null;
+    if (ex.name === 'AbortError') return;
+    if (ex.name === 'NotAllowedError') { toast('Datei ist fertig – bitte noch einmal tippen.'); return; }
+    console.error(ex);
+    toast(`Umlagerungsschein fehlgeschlagen: ${ex.message}`, 'error');
+  }
+}
+
+async function uploadTemplate(file) {
+  try {
+    if (!/\.xlsx$/i.test(file.name)) throw new Error('Bitte die Excel-Datei (.xlsx) wählen.');
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const { rows } = readTemplate(await loadFflate(), bytes);
+    store.saveUmlagerungTemplate(bytes, file.name);
+    toast(`Vorlage gespeichert (${rows.length} Materialzeilen)`);
+  } catch (ex) {
+    console.error(ex);
+    toast(ex.message, 'error');
+  }
+}
+
 // ======================================================================
 // Packhinweise
 // ======================================================================
@@ -1942,9 +2058,11 @@ function viewOrderList() {
         $('#list', root).innerHTML = `
           ${sectionTitle('Nachbestellen', open.length, open.length > 1 ? '<button type="button" class="link-btn" id="all-ordered">Alle bestellt</button>' : '')}
           ${open.length ? `<ul class="card ol">${open.map(openEntry).join('')}</ul>` : '<p class="hint">Nichts offen.</p>'}
+          ${umlagBox()}
           ${ordered.length ? `${sectionTitle('Bestellt', ordered.length)}<ul class="card ol">${ordered.map(orderedEntry).join('')}</ul>` : ''}`;
       };
-      root.addEventListener('click', (e) => {
+      // Am Listen-Element (wird mit der Ansicht neu erzeugt), nicht an #main – sonst doppelte Handler.
+      $('#list', root).addEventListener('click', (e) => {
         const b = e.target.closest('[data-act]');
         if (b) {
           const { act, id } = b.dataset;
@@ -1967,8 +2085,9 @@ function viewOrderList() {
         }
       });
       $('#share').addEventListener('click', shareOrderList);
-      draw();
-      return draw;
+      const redraw = () => { draw(); bindUmlag(root); };
+      redraw();
+      return redraw;
     },
   };
 }
@@ -2054,6 +2173,20 @@ function viewMore() {
         <p class="form-error" id="ls-err" role="alert"></p>
       </form>
 
+      ${sectionTitle('Umlagerungsschein')}
+      <form class="card box" id="umlag-form" novalidate>
+        <p>${store.umlagerungTemplate()
+          ? `Vorlage: <b>${esc(store.umlagerungSettings().name)}</b> (${formatDate(store.umlagerungSettings().uploadedAt)})`
+          : '<span class="warn-text">Noch keine Vorlage.</span> Die Excel-Datei (UmlagerungsscheinBOWERT.xlsx) einmal hochladen.'}</p>
+        <button type="button" class="btn btn-secondary btn-block" id="tpl-up">${icon.upload}<span>${store.umlagerungTemplate() ? 'Vorlage ersetzen' : 'Vorlage hochladen'}</span></button>
+        <input type="file" id="tpl-file" accept=".xlsx,${'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}" hidden>
+        <div class="field" style="margin-top:14px"><label for="umlag-to">Mail-Empfänger <span class="opt">optional</span></label>
+          <div class="input-row"><input id="umlag-to" class="input" type="email" inputmode="email" autocomplete="off" value="${esc(store.umlagerungSettings().to || '')}" placeholder="name@firma.de">
+          <button class="btn btn-secondary" type="submit">Speichern</button></div>
+          <p class="hint">Am Computer wird die Mail an diese Adresse vorbereitet. Am Handy wählst du den Empfänger im Mail-Programm.</p></div>
+        <p class="form-error" id="umlag-err" role="alert"></p>
+      </form>
+
       ${sectionTitle('Speicherung')}
       <div class="card box">
         <p>Die Daten liegen <b>online</b> (Firebase, Rechenzentrum Frankfurt). Alle Mitarbeiter sehen dieselben Daten,
@@ -2073,6 +2206,16 @@ function viewMore() {
       <p class="version">BO-WERT Konfektionierung · v${APP_VERSION}</p>`,
     mount(root) {
       $('#export', root).addEventListener('click', exportBackup);
+      $('#tpl-up', root).addEventListener('click', () => $('#tpl-file', root).click());
+      $('#tpl-file', root).addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) uploadTemplate(f); });
+      $('#umlag-form', root).addEventListener('submit', (e) => {
+        e.preventDefault();
+        try {
+          store.setUmlagerungMail($('#umlag-to', root).value);
+          $('#umlag-err', root).textContent = '';
+          toast('Mail-Empfänger gespeichert');
+        } catch (ex) { $('#umlag-err', root).textContent = ex.message; }
+      });
       $('#ls-form', root).addEventListener('submit', (e) => {
         e.preventDefault();
         try {

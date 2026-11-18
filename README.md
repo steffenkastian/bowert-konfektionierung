@@ -27,8 +27,8 @@ Ein Material (Artikelnummer) wird nur einmal gepflegt. Ändert sich sein Lageror
 | **Fertig melden** | Auf der Auftragsseite **1 Palette** (= Satz pro Palette des Artikels) oder **Andere Menge** (Satz + Paletten, auch für frühere Tage). Fortschritt „x von y Satz“ steht am Auftrag und in der Auftragsliste. |
 | **Lieferscheine** | Tagesübersicht (mit ‹ › frühere Tage): pro Auftrag ein Lieferschein mit der Tagessumme. **Lieferscheine erstellen** vergibt fortlaufende Nummern (JJJJ + laufende Nummer, im neuen Jahr ab JJJJ0001; nächste Nummer unter ⚙ änderbar). **PDF teilen / drucken** erzeugt alle Lieferscheine des Tages als eine PDF im Layout der alten Word-Vorlage. Wird danach noch etwas geändert, ist der Lieferschein als „geändert“ markiert und kann mit derselben Nummer neu verschickt werden. **Alle Lieferscheine**: Liste mit Filter und Export als Tabelle (CSV). |
 | **Artikel** | Umschalter **Artikel / Material** oben. Satz pro Palette und Text auf dem Lieferschein (leer = „Konfektionierung - Artikelbezeichnung“). Materialien per Artikelnummer zuordnen. Bekannte Nummern füllen Beschreibung und Lagerort automatisch aus. **Packhinweise:** Foto (direkt mit der Kamera) oder PDF hochladen – erscheint bei jedem Auftrag mit diesem Artikel. Antippen zeigt Foto bzw. alle PDF-Seiten in der App; umbenennen, teilen, löschen. |
-| **Bestellliste** | Überall, wo ein Lagerort steht, gibt es **Entnehmen** → das Material landet hier (mehrfach tippen = Menge +1). Menge anpassen, als *bestellt* markieren, bei Eintreffen abhaken, Liste per WhatsApp/Mail **teilen**. |
-| ⚙ **Mehr** | Datenbestand, Sicherungskopie (JSON), Anleitung „Als App installieren“, Abmelden. |
+| **Bestellliste** | Überall, wo ein Lagerort steht, gibt es **Entnehmen** → das Material landet hier (mehrfach tippen = Menge +1). Menge anpassen, als *bestellt* markieren, bei Eintreffen abhaken, Liste per WhatsApp/Mail **teilen**. **Umlagerungsschein:** füllt die Excel-Vorlage aus (Menge = Anzahl Paletten in Spalte A bei der passenden Teile-Nr.; unbekannte Teile-Nr. werden unten angehängt) – **Per Mail senden** oder als Excel speichern, danach optional alles als bestellt markieren. |
+| ⚙ **Mehr** | Nächste Lieferscheinnummer, Umlagerungsschein-Vorlage (.xlsx) hochladen/ersetzen + Mail-Empfänger, Datenbestand, Sicherungskopie (JSON), Anleitung „Als App installieren“, Abmelden. |
 
 ## Speicherung & Sicherheit
 
@@ -58,15 +58,17 @@ js/config.js           Firebase-Projektdaten + Team-Konto
 js/ui.js               Helfer: Suche, Sortierung, Icons, Vorschläge
 js/files.js            Packhinweise: Fotos verkleinern, PDF-Anzeige
 js/lieferschein.js     Lieferschein-PDF (Nachbau der Word-Vorlage, Koordinaten aus der alten PDF)
+js/umlagerung.js       Umlagerungsschein: füllt die Excel-Vorlage auf XML-Ebene aus (Rest bleibt unverändert)
 vendor/pdfjs/          pdf.js 4.10.38 (Mozilla, Apache-2.0) zum Anzeigen von PDFs
 vendor/jspdf/          jsPDF 3.0.3 (MIT) zum Erzeugen der Lieferscheine
 vendor/fonts/          Caladea (OFL) – maßgleich zu Cambria aus der Word-Vorlage
+vendor/fflate/         fflate 0.8.2 (MIT) zum Lesen/Schreiben der .xlsx-Datei
 sw.js                  Service Worker (App-Dateien offline)
 firestore.rules        Zugriffsregeln der Datenbank
 ```
 
 **Neue Version veröffentlichen:** committen und pushen, vorher in `sw.js` die Konstante `CACHE` hochzählen
-(z. B. `konf-v7`), damit installierte Apps die neuen Dateien laden.
+(z. B. `konf-v8`), damit installierte Apps die neuen Dateien laden.
 **Regeln ändern:** `firebase deploy --only firestore`.
 
 **Kostenlos-Grenzen (Spark):** 50.000 Lesevorgänge und 20.000 Schreibvorgänge pro Tag, 1 GB Speicher,
@@ -79,4 +81,7 @@ firestore.rules        Zugriffsregeln der Datenbank
   dieses Auftrags an früheren Tagen.
 - `settings/lieferschein`: nächste freie Nummer. Vergabe per Firestore-Transaktion (keine doppelten Nummern,
   braucht Internetverbindung).
+- `settings/umlagerung`: Excel-Vorlage des Umlagerungsscheins (nicht im öffentlichen Repo, da Kundenformular)
+  und optional der Mail-Empfänger. Geändert werden beim Ausfüllen nur Spalte A, die ausgeblendeten Zeilen
+  (Autofilter auf Spalte A) und der gespeicherte Wert der Datumsformel in C6.
 - Der Ordner `AlteVorlagen/` (altes Python-Skript, enthält Zugangsdaten) ist per `.gitignore` ausgeschlossen.

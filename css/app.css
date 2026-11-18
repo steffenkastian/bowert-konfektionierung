@@ -813,3 +813,15 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 36px;
 .input-row .btn { flex: none; }
 .ord-info { margin: -8px 2px 14px; font-size: 14px; color: var(--accent-text); }
 .ord-info:empty { display: none; }
+
+/* ---------- Umlagerungsschein ---------- */
+
+.umlag { margin-top: 12px; }
+.umlag-head { display: flex; align-items: flex-start; gap: 10px; margin: 12px 0 10px; }
+.umlag-head > svg { flex: none; width: 22px; height: 22px; margin-top: 2px; color: var(--accent-text); }
+.umlag-head > div { display: flex; flex-direction: column; }
+.umlag-head span { font-size: 14px; color: var(--muted); }
+.umlag-head .muted { font-size: 13px; }
+.umlag-missing { margin: 0 0 10px; padding: 8px 10px; border-radius: 10px; background: var(--warn-pale); color: var(--warn); font-size: 13.5px; }
+.btn-row2 { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.umlag .hint { margin-top: 8px; }
