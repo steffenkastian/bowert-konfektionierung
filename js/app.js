@@ -9,7 +9,7 @@ import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 import { deliveryPdf } from './lieferschein.js';
 import { fillUmlagerung, readTemplate, loadFflate, digits } from './umlagerung.js';
 
-const APP_VERSION = '3.4.2';
+const APP_VERSION = '3.5.0';
 // Abrechnungs-App (abrechnung/index.html): eigenes Konto, zusätzlich Umsatz, Preise, Rechnungen.
 const IS_BILLING = store.IS_BILLING;
 const billing = IS_BILLING ? await import('./abrechnung.js') : null;
@@ -615,13 +615,16 @@ function searchHome() {
     noMaterial && row({ href: '#/artikel?offen=1', title: esc(`${plural(noMaterial, 'Artikel', 'Artikel')} ohne Material`), sub: 'Materialien hinterlegen' }),
     noLocation && row({ href: '#/material?offen=1', title: esc(`${plural(noLocation, 'Material', 'Materialien')} ohne Lagerort`), sub: 'Lagerort eintragen' }),
   ].filter(Boolean);
-  const todays = store.deliveriesOn(store.localDate()).filter((d) => store.deliveryQty(d));
-  const todayOpen = todays.filter((d) => !d.no).length;
-  const todayBox = todays.length ? `${sectionTitle('Heute fertig')}<ul class="card list">${row({
+  const coll = store.collected();
+  const collOrders = new Set(coll.map((d) => d.orderId)).size;
+  const todayNotes = store.deliveriesOn(store.localDate()).filter((d) => d.no);
+  const todayBox = coll.length || todayNotes.length ? `${sectionTitle('Fertig gemeldet')}<ul class="card list">${row({
     href: '#/lieferscheine',
-    title: esc(`${palLabel(todays.reduce((s, d) => s + store.deliveryPallets(d), 0))} · ${fmtN(todays.reduce((s, d) => s + store.deliveryQty(d), 0))} Satz`),
-    sub: esc(todayOpen ? `${plural(todayOpen, 'Auftrag', 'Aufträge')} noch ohne Lieferschein` : 'Alle Lieferscheine erstellt'),
-    tag: todayOpen ? `<span class="tag tag-warn">${todayOpen} offen</span>` : '',
+    title: esc(coll.length
+      ? `Gesammelt: ${palLabel(coll.reduce((s, d) => s + store.deliveryPallets(d), 0))} · ${fmtN(coll.reduce((s, d) => s + store.deliveryQty(d), 0))} Satz`
+      : `Heute: ${palLabel(todayNotes.reduce((s, d) => s + store.deliveryPallets(d), 0))} · ${fmtN(todayNotes.reduce((s, d) => s + store.deliveryQty(d), 0))} Satz`),
+    sub: esc(coll.length ? `${plural(collOrders, 'Auftrag', 'Aufträge')} noch ohne Lieferschein` : 'Alle Lieferscheine erstellt'),
+    tag: coll.length ? `<span class="tag tag-warn">${collOrders} offen</span>` : '',
   })}</ul>` : '';
   return `
     ${todayBox}
@@ -1229,6 +1232,8 @@ function viewAddMaterial(articleId) {
 
 const fmtN = (n) => Number(n || 0).toLocaleString('de-DE');
 const fmtDay = (iso) => (iso ? iso.split('-').reverse().join('.') : '');
+/** Zeitpunkt „19.11., 14:20“. */
+const fmtStamp = (at) => new Date(at).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 const dayLabel = (iso) => new Date(`${iso}T12:00`).toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 const shiftDay = (iso, n) => { const d = new Date(`${iso}T12:00`); d.setDate(d.getDate() + n); return store.localDate(d); };
 const isIsoDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
@@ -1248,7 +1253,7 @@ function progressHtml(o) {
     ${p.total ? `<div class="bar"><span class="bar-done" style="width:${dPct}%"></span><span class="bar-open" style="width:${oPct}%"></span></div>` : ''}
     <div class="progress-legend">
       <span class="lg lg-done">${fmtN(p.delivered)} auf Lieferscheinen</span>
-      ${p.open ? `<span class="lg lg-open">${fmtN(p.open)} ohne Lieferschein</span>` : ''}
+      ${p.open ? `<span class="lg lg-open">${fmtN(p.open)} gesammelt</span>` : ''}
       ${p.total && p.total > p.done ? `<span class="lg">noch ${fmtN(p.total - p.done)}</span>` : ''}
     </div>
   </div>`;
@@ -1265,7 +1270,10 @@ function progressShort(o) {
 function palletBox(o) {
   const a = store.getArticle(o.articleId);
   const per = a?.perPallet || 0;
-  const today = store.deliveryFor(o.id, store.localDate());
+  const coll = store.collectedOf(o.id);
+  const collQty = coll.reduce((s, d) => s + store.deliveryQty(d), 0);
+  const collPal = coll.reduce((s, d) => s + store.deliveryPallets(d), 0);
+  const todayNotes = store.deliveriesOn(store.localDate()).filter((d) => d.no && d.orderId === o.id);
   const n = store.deliveriesOfOrder(o.id).filter((d) => d.no).length;
   return `<section class="card pallet-box">
     <div class="box-head"><span>Fertig gemeldet</span>
@@ -1277,9 +1285,12 @@ function palletBox(o) {
       <a class="btn btn-secondary" href="#/eintrag/neu?auftrag=${o.id}">Andere Menge</a>
     </div>
     ${!per && a ? `<p class="hint">Für „1 Palette“ beim Artikel <a href="#/artikel/${a.id}/bearbeiten">Satz pro Palette eintragen</a>.</p>` : ''}
-    ${today ? `<a class="today-line" href="#/lieferschein/${today.id}">
-        <span><b>Heute:</b> ${palLabel(store.deliveryPallets(today))} · ${fmtN(store.deliveryQty(today))} Satz</span>
-        <span class="today-ls">${today.no ? `Lieferschein ${esc(today.no)} · ${STATE_TEXT[store.deliveryState(today)]}` : 'noch ohne Lieferschein'}</span>${icon.chevron}</a>` : ''}
+    ${coll.length ? `<a class="today-line" href="${coll.length === 1 ? `#/lieferschein/${coll[0].id}` : '#/lieferscheine'}">
+        <span><b>Gesammelt:</b> ${palLabel(collPal)} · ${fmtN(collQty)} Satz</span>
+        <span class="today-ls">noch ohne Lieferschein</span>${icon.chevron}</a>` : ''}
+    ${todayNotes.map((d) => `<a class="today-line" href="#/lieferschein/${d.id}">
+        <span><b>Heute:</b> ${palLabel(store.deliveryPallets(d))} · ${fmtN(store.deliveryQty(d))} Satz</span>
+        <span class="today-ls">Lieferschein ${esc(d.no)} · ${STATE_TEXT[store.deliveryState(d)]}</span>${icon.chevron}</a>`).join('')}
   </section>`;
 }
 
@@ -1290,8 +1301,8 @@ function bindPalletBox(root, o) {
     try {
       const { delivery, entry } = store.addEntry(o.id, { qty: per, pallets: 1 });
       navigator.vibrate?.(25);
-      const changed = delivery.no ? ` · Lieferschein ${delivery.no} neu verschicken` : '';
-      toast(`Palette erfasst – heute ${palLabel(store.deliveryPallets(delivery))}${changed}`, 'ok', {
+      const pal = store.collectedOf(o.id).reduce((s, d) => s + store.deliveryPallets(d), 0);
+      toast(`Palette erfasst – gesammelt ${palLabel(pal)}`, 'ok', {
         label: 'Rückgängig', run: () => store.removeDeliveryEntry(delivery.id, entry.id),
       });
     } catch (ex) { toast(ex.message, 'error'); }
@@ -1472,6 +1483,7 @@ async function createNotes(ids, btn) {
   }
   // Automatisch verschicken, wenn Mailversand + Empfänger eingerichtet sind
   if (created.length && canAutoSend()) await sendNotes(created.map((c) => store.getDelivery(c.id)).filter(Boolean), btn);
+  return created;
 }
 
 // ---------- Tagesübersicht ----------
@@ -1500,22 +1512,29 @@ function viewDeliveries(query) {
       $('#day', root).addEventListener('change', (e) => { if (isIsoDate(e.target.value)) go2(e.target.value); });
 
       const draw = () => {
-        const all = store.deliveriesOn(date).filter((d) => d.no || store.deliveryQty(d));
-        const open = all.filter((d) => !d.no).sort((a, b) => natCmp(a.orderNr || '', b.orderNr || ''));
-        const done = all.filter((d) => d.no).sort((a, b) => String(a.no).localeCompare(String(b.no)));
+        const isToday = date === today;
+        // Gesammelt (noch ohne Lieferschein) – wird beim Erstellen zu Lieferscheinen mit dem heutigen Datum
+        const open = isToday ? store.collected().sort((a, b) => natCmp(a.orderNr || '', b.orderNr || '')
+          || (a.date || '').localeCompare(b.date || '')) : [];
+        const openOrders = new Set(open.map((d) => d.orderId)).size;
+        const done = store.deliveriesOn(date).filter((d) => d.no).sort((a, b) => String(a.no).localeCompare(String(b.no)));
         const unsent = done.filter((d) => ['erstellt', 'geaendert'].includes(store.deliveryState(d)));
-        const qty = all.reduce((s, d) => s + store.deliveryQty(d), 0);
-        const pallets = all.reduce((s, d) => s + store.deliveryPallets(d), 0);
-        const add = `<a class="btn btn-secondary btn-block" href="#/eintrag/neu?datum=${date}">${icon.plus}<span>Palette / Satz ${date === today ? 'eintragen' : `für den ${fmtDay(date)} nachtragen`}</span></a>`;
-        $('#day-body', root).innerHTML = !all.length
-          ? `${emptyBox(date === today ? 'Heute noch nichts fertig gemeldet' : 'An diesem Tag nichts eingetragen',
-              'Fertige Paletten meldest du beim Auftrag mit „1 Palette“ – oder hier eintragen.')}${add}
+        const qty = done.reduce((s, d) => s + store.deliveryQty(d), 0);
+        const pallets = done.reduce((s, d) => s + store.deliveryPallets(d), 0);
+        const openQty = open.reduce((s, d) => s + store.deliveryQty(d), 0);
+        const openPal = open.reduce((s, d) => s + store.deliveryPallets(d), 0);
+        const add = isToday ? `<a class="btn btn-secondary btn-block" href="#/eintrag/neu">${icon.plus}<span>Palette / Satz eintragen</span></a>` : '';
+        $('#day-body', root).innerHTML = !open.length && !done.length
+          ? `${emptyBox(isToday ? 'Nichts gesammelt' : 'An diesem Tag keine Lieferscheine',
+              isToday ? 'Fertige Paletten meldest du beim Auftrag mit „1 Palette“ – oder hier eintragen. Sie werden gesammelt, bis du die Lieferscheine erstellst.' : 'Mit den Pfeilen zu einem anderen Tag.')}${add}
              <a class="btn btn-secondary btn-block" href="#/lieferscheine/alle">Alle Lieferscheine</a>`
-          : `<div class="card day-sum"><b>${palLabel(pallets)}</b><span>${fmtN(qty)} Satz · ${plural(all.length, 'Auftrag', 'Aufträge')}</span></div>
-            ${open.length ? `${sectionTitle('Noch ohne Lieferschein', open.length)}
+          : `${open.length ? `${sectionTitle('Gesammelt – noch ohne Lieferschein', openOrders)}
+              <div class="card day-sum"><b>${palLabel(openPal)}</b><span>${fmtN(openQty)} Satz · ${plural(openOrders, 'Auftrag', 'Aufträge')}</span></div>
               <ul class="card list">${open.map((d) => deliveryRow(d)).join('')}</ul>
-              <button type="button" class="btn btn-primary btn-block" id="create-all">${icon.check}<span>${open.length === 1 ? 'Lieferschein erstellen' : `${open.length} Lieferscheine erstellen`}${canAutoSend() ? ' & senden' : ''}</span></button>` : ''}
-            ${done.length ? `${sectionTitle('Lieferscheine', done.length)}
+              <button type="button" class="btn btn-primary btn-block" id="create-all">${icon.check}<span>${openOrders === 1 ? 'Lieferschein erstellen' : `${openOrders} Lieferscheine erstellen`}${canAutoSend() ? ' & senden' : ''}</span></button>
+              <p class="hint center">Datum: heute, ${fmtDay(today)}. Danach wird neu gesammelt.</p>` : ''}
+            ${done.length ? `${sectionTitle(isToday ? 'Heute erstellt' : 'Lieferscheine', done.length)}
+              <div class="card day-sum"><b>${palLabel(pallets)}</b><span>${fmtN(qty)} Satz · ${plural(done.length, 'Lieferschein', 'Lieferscheine')}</span></div>
               <ul class="card list">${done.map((d) => deliveryRow(d)).join('')}</ul>
               ${unsent.length && canAutoSend() ? `<button type="button" class="btn ${open.length ? 'btn-secondary' : 'btn-primary'} btn-block" id="send-all">${icon.send}<span>${unsent.length === 1 ? 'Lieferschein senden' : `${unsent.length} Lieferscheine senden`}</span></button>` : ''}
               <button type="button" class="btn ${open.length || (unsent.length && canAutoSend()) ? 'btn-secondary' : 'btn-primary'} btn-block" id="share-all">${icon.share}<span>${done.length === 1 ? 'PDF teilen / drucken' : `PDF mit allen ${done.length} teilen / drucken`}</span></button>
@@ -1540,6 +1559,9 @@ let previewFor = null;
 
 function viewDelivery(id) {
   const d = store.getDelivery(id);
+  // Gesammeltes wurde gerade zum Lieferschein → dorthin
+  const madeInto = !d && store.createdFrom(id);
+  if (madeInto && store.getDelivery(madeInto)) { setTimeout(() => replace(`#/lieferschein/${madeInto}`)); return viewDelivery(madeInto); }
   if (!d) return notFound('Lieferschein');
   const o = store.getOrder(d.orderId);
   const a = store.getArticle(o?.articleId);
@@ -1552,13 +1574,13 @@ function viewDelivery(id) {
   const kv = (k, v) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`;
   const view = {
     title: d.no ? 'Lieferschein' : 'Lieferung',
-    back: `#/lieferscheine${d.date === store.localDate() ? '' : `?datum=${d.date}`}`,
+    back: `#/lieferscheine${!d.no || d.date === store.localDate() ? '' : `?datum=${d.date}`}`,
     tab: 'lieferscheine',
     html: `
       <div class="detail-head">
-        <span class="eyebrow">${d.no ? 'Lieferschein' : 'Noch ohne Lieferschein'}</span>
+        <span class="eyebrow">${d.no ? 'Lieferschein' : 'Gesammelt – noch ohne Lieferschein'}</span>
         <div class="detail-title">${d.no ? `Nr. ${esc(d.no)}` : nrHtml(n.orderNr.replace(store.ORDER_PREFIX, ''))}</div>
-        <div class="detail-sub">${esc(dayLabel(d.date))}</div>
+        <div class="detail-sub">${esc(d.no ? dayLabel(d.date) : entries[0]?.at ? `seit ${fmtStamp(entries[0].at)}` : '')}</div>
       </div>
       ${inv ? `<p class="notice notice-ok">Abgerechnet mit ${billing ? `<a href="#/rechnung/${esc(inv.id)}">Rechnung ${esc(store.formatInvoiceNo(inv.no))}</a>` : `Rechnung ${esc(store.formatInvoiceNo(inv.no))}`} – kann nicht mehr geändert werden.</p>` : ''}
       ${st === 'geaendert' && !inv ? `<p class="notice">Nach dem Versand geändert (verschickt: ${fmtN(sentV.qty)} Satz / ${palLabel(sentV.pallets)}) – bitte die korrigierte Fassung senden.</p>` : ''}
@@ -1577,7 +1599,7 @@ function viewDelivery(id) {
            <p class="hint center">an ${esc(store.lsMailTo())}</p>` : ''}
       ${d.no ? `<button type="button" class="btn ${canAutoSend() && st !== 'verschickt' ? 'btn-secondary' : 'btn-primary'} btn-block" id="share">${icon.share}<span>PDF teilen / drucken</span></button>`
         : `<button type="button" class="btn btn-primary btn-block" id="create" ${n.qty ? '' : 'disabled'}>${icon.check}<span>Lieferschein erstellen</span></button>
-           <p class="hint center">Die Nummer (nächste: ${store.nextDeliveryNo()}) wird beim Erstellen vergeben.</p>`}
+           <p class="hint center">Datum: heute, ${fmtDay(store.localDate())}. Die Nummer (nächste: ${store.nextDeliveryNo()}) wird beim Erstellen vergeben.</p>`}
       <button type="button" class="btn btn-secondary btn-block" id="preview">${previewFor === d.id ? 'Vorschau schließen' : 'Vorschau'}</button>
       <div id="pdf-box" class="file-view is-pdf" ${previewFor === d.id ? '' : 'hidden'}></div>
       ${versions.length ? `${sectionTitle('Verschickt / archiviert', versions.length)}
@@ -1589,10 +1611,10 @@ function viewDelivery(id) {
       ${entries.length ? `<ul class="card list">${entries.map((e) => row({
         href: `#/eintrag/${d.id}/${e.id}`,
         title: `${fmtN(e.qty)} Satz · ${palLabel(Number(e.pallets) || 0)}`,
-        sub: esc(e.at ? new Date(e.at).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''),
+        sub: esc(e.at ? fmtStamp(e.at) : ''),
       })).join('')}</ul>` : '<p class="hint">Keine Einträge.</p>'}
-      ${inv ? '' : `<a class="btn btn-secondary btn-block" href="#/eintrag/neu?auftrag=${d.orderId}&datum=${d.date}">${icon.plus}<span>Eintrag hinzufügen</span></a>
-      ${deleteButton(d.no ? 'Lieferschein löschen' : 'Lieferung löschen')}`}`,
+      ${inv ? '' : `${d.no ? '' : `<a class="btn btn-secondary btn-block" href="#/eintrag/neu?auftrag=${d.orderId}">${icon.plus}<span>Eintrag hinzufügen</span></a>`}
+      ${deleteButton(d.no ? 'Lieferschein löschen' : 'Gesammelte Paletten löschen')}`}`,
     mount(root) {
       const box = $('#pdf-box', root);
       const showPreview = async () => {
@@ -1634,14 +1656,14 @@ function viewDelivery(id) {
           box.innerHTML = `<p class="empty-inline pad">${esc(ex.message)}</p>`;
         }
       });
-      $('#create', root)?.addEventListener('click', (e) => createNotes([d.id], e.currentTarget));
+      $('#create', root)?.addEventListener('click', (e) => createNotes(store.collectedOf(d.orderId).map((x) => x.id), e.currentTarget));
       if (d.no) pdfFile([d]).catch(() => {});
       $('#del', root)?.addEventListener('click', () => {
-        const what = d.no ? `Lieferschein ${d.no}` : 'diese Lieferung';
+        const what = d.no ? `Lieferschein ${d.no}` : 'die gesammelten Paletten';
         const sentNote = d.versions?.length ? '\n\nACHTUNG: Er wurde bereits verschickt – das Archiv wird mit gelöscht.' : '';
         if (!confirm(`${what} mit allen Einträgen löschen?${d.no ? '\n\nDie Nummer wird nicht neu vergeben.' : ''}${sentNote}`)) return;
         try { store.deleteDelivery(d.id); } catch (ex) { toast(ex.message, 'error'); return; }
-        toast(d.no ? `Lieferschein ${d.no} gelöscht` : 'Lieferung gelöscht');
+        toast(d.no ? `Lieferschein ${d.no} gelöscht` : 'Gesammelte Paletten gelöscht');
         back(view.back);
       });
     },
@@ -1666,7 +1688,6 @@ function viewEntryEdit(deliveryId, entryId, query) {
     };
   }
   let order = store.getOrder(d?.orderId || params.get('auftrag') || '');
-  const date0 = d?.date || (isIsoDate(params.get('datum')) ? params.get('datum') : store.localDate());
   const perOf = (o) => store.getArticle(o?.articleId)?.perPallet || 0;
   return {
     title: e ? 'Eintrag ändern' : 'Palette / Satz eintragen',
@@ -1678,7 +1699,6 @@ function viewEntryEdit(deliveryId, entryId, query) {
         ${field({ id: 'ord', label: 'Auftrag', value: order?.nr || '', placeholder: '6 Ziffern, z. B. 231084', suggest: true,
           attrs: `${CODE_ATTRS} inputmode="numeric" enterkeyhint="next" ${e ? 'readonly' : ''}` })}
         <div id="ord-info" class="ord-info"></div>
-        <div class="field"><label for="date">Tag</label><input id="date" class="input" type="date" value="${date0}" max="${store.localDate()}"></div>
         <div class="two-col">
           ${field({ id: 'qty', label: 'Satz', value: e?.qty ?? '', placeholder: '0', attrs: 'inputmode="numeric" autocomplete="off" enterkeyhint="next"' })}
           ${field({ id: 'pal', label: 'Paletten', value: e?.pallets ?? '', placeholder: '1', attrs: 'inputmode="numeric" autocomplete="off" enterkeyhint="done"' })}
@@ -1690,7 +1710,6 @@ function viewEntryEdit(deliveryId, entryId, query) {
       ${e ? deleteButton('Eintrag löschen') : ''}`,
     mount(root) {
       const ord = $('#ord', root);
-      const dateIn = $('#date', root);
       const qty = $('#qty', root);
       const pal = $('#pal', root);
       let palTouched = Boolean(e);
@@ -1699,10 +1718,11 @@ function viewEntryEdit(deliveryId, entryId, query) {
         $('#ord-info', root).innerHTML = order
           ? `${esc(store.getArticle(order.articleId)?.name || 'kein Artikel')}${per ? ` · ${fmtN(per)} Satz pro Palette` : ''} · ${esc(progressShort(order) || 'noch nichts fertig')}`
           : '';
-        const target = order && store.deliveryFor(order.id, dateIn.value);
         const hint = $('#target-hint', root);
-        hint.hidden = !target?.no;
-        if (target?.no) hint.textContent = `Für diesen Tag gibt es schon Lieferschein ${target.no} – er wird angepasst und muss neu verschickt werden.`;
+        hint.hidden = !order;
+        hint.textContent = d?.no
+          ? `Lieferschein ${d.no} wird angepasst und muss neu verschickt werden.`
+          : 'Wird gesammelt – der Lieferschein entsteht mit „Lieferscheine erstellen“ (Datum: an dem Tag).';
         if (!palTouched) {
           const q = Number(String(qty.value).replace(/\D/g, '')) || 0;
           pal.value = q ? (per ? Math.max(1, Math.ceil(q / per)) : 1) : '';
@@ -1719,7 +1739,6 @@ function viewEntryEdit(deliveryId, entryId, query) {
         max: 8,
       });
       ord.addEventListener('input', () => { order = store.findOrderByNr(ord.value); info(); });
-      dateIn.addEventListener('change', info);
       qty.addEventListener('input', info);
       pal.addEventListener('input', () => { palTouched = pal.value !== ''; if (!palTouched) info(); });
       nextOnEnter(ord, qty, pal);
@@ -1732,9 +1751,9 @@ function viewEntryEdit(deliveryId, entryId, query) {
         ev.preventDefault();
         try {
           if (!order) throw new Error('Bitte einen Auftrag wählen.');
-          const v = { date: dateIn.value, qty: qty.value, pallets: pal.value };
+          const v = { qty: qty.value, pallets: pal.value };
           const res = e ? store.updateEntry(d.id, e.id, v) : store.addEntry(order.id, v).delivery;
-          toast(`${fmtN(Number(String(qty.value).replace(/\D/g, '')))} Satz eingetragen${res.no ? ` · Lieferschein ${res.no} neu verschicken` : ''}`);
+          toast(`${fmtN(Number(String(qty.value).replace(/\D/g, '')))} Satz ${e ? 'geändert' : 'gesammelt'}${res.no ? ` · Lieferschein ${res.no} neu verschicken` : ''}`);
           back(d ? `#/lieferschein/${res.id}` : `#/auftrag/${order.id}`);
         } catch (ex) {
           $('#err', root).textContent = ex.message;

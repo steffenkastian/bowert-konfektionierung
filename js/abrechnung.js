@@ -466,9 +466,9 @@ function viewInvoiceNew(query) {
           ${quick(monthLabel(monthOf(today)), monthStart(monthOf(today)), monthEnd(monthOf(today)))}
         </div>
       </form>
-      ${withoutNo.length ? `<p class="notice">${plural(withoutNo.length, 'Lieferung', 'Lieferungen')} ohne Lieferschein
-        (${C.fmtN(withoutNo.reduce((s, d) => s + store.deliveryQty(d), 0))} Satz) – wird nicht berechnet. Erst den Lieferschein erstellen:
-        ${[...new Set(withoutNo.map((d) => d.date))].map((d) => `<a href="#/lieferscheine?datum=${d}">${C.fmtDay(d)}</a>`).join(', ')}</p>` : ''}
+      ${withoutNo.length ? `<p class="notice">Gesammelt, noch ohne Lieferschein: ${C.fmtN(withoutNo.reduce((s, d) => s + store.deliveryQty(d), 0))} Satz
+        (${plural(new Set(withoutNo.map((d) => d.orderId)).size, 'Auftrag', 'Aufträge')}) – wird nicht berechnet.
+        Der Lieferschein bekommt das Datum, an dem er erstellt wird: <a href="#/lieferscheine">Lieferscheine</a></p>` : ''}
       ${blocked.length ? `<p class="notice">${plural(blocked.length, 'Auftrag wird', 'Aufträge werden')} übersprungen – Preis fehlt:
         ${[...new Map(blocked.map((b) => [b.article?.id, b.article])).values()].map((a) => (a ? `<a href="#/artikel/${a.id}">${esc(a.name)}</a>` : 'ohne Artikel')).join(', ')}</p>` : ''}
       ${batches.length ? `
