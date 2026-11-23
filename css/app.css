@@ -579,6 +579,7 @@ main > .btn-block { margin-top: 12px; }
   --st-naechstes-bg: #fbe8d0; --st-naechstes-ink: #8a4700; --st-naechstes-solid: #c26400;
   --st-arbeit-bg: #dceafc; --st-arbeit-ink: #1652a6; --st-arbeit-solid: #1c6dd0;
   --st-fertig-bg: #e1eedf; --st-fertig-ink: #2f5a33; --st-fertig-solid: #517b54;
+  --lb-orange: #d9730d; --lb-orange-bg: #fde9d4;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -586,6 +587,7 @@ main > .btn-block { margin-top: 12px; }
     --st-naechstes-bg: #3b2a15; --st-naechstes-ink: #f4b36a; --st-naechstes-solid: #b85f00;
     --st-arbeit-bg: #182c47; --st-arbeit-ink: #8cbcf5; --st-arbeit-solid: #2f7fdc;
     --st-fertig-bg: #1f3222; --st-fertig-ink: #9cc79f; --st-fertig-solid: #517b54;
+    --lb-orange: #f39a3e; --lb-orange-bg: #3d2a14;
   }
 }
 .status {
@@ -930,3 +932,36 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 36px;
 }
 .link-btn svg { width: 17px; height: 17px; }
 .link-btn:active { background: var(--press); }
+
+/* ---------- Etiketten (grau → orange bestellt → grün gedruckt) ---------- */
+.order-li { display: flex; align-items: center; }
+.order-li .row { flex: 1; min-width: 0; padding-left: 2px; }
+.list li.order-li + li .row, .list li + li.order-li .row { border-top: 0; }
+.list li + li.order-li { border-top: 1px solid var(--line); }
+.label-btn {
+  flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  width: 44px; height: 44px; margin-left: 6px; padding: 0; border: 0; border-radius: 12px;
+  background: transparent; color: var(--muted); font: inherit; cursor: pointer;
+}
+.label-btn svg { width: 24px; height: 24px; }
+.label-btn:active { background: var(--press); }
+.label-btn.lb-offen svg { opacity: 0.5; }
+.label-btn.lb-bestellt { color: var(--lb-orange); }
+.label-btn.lb-bestellt svg { fill: var(--lb-orange-bg); }
+.label-btn.lb-gedruckt { color: var(--st-fertig-solid); }
+.label-btn.lb-gedruckt svg { fill: var(--st-fertig-solid); }
+.label-btn.lb-gedruckt svg circle { fill: var(--surface); stroke: var(--surface); }
+.detail-head.has-side { display: flex; align-items: flex-start; gap: 12px; }
+.detail-head.has-side .detail-main { flex: 1; min-width: 0; }
+.label-btn.is-big {
+  width: auto; height: auto; min-height: 48px; margin: 6px 0 0; padding: 8px 12px 8px 10px;
+  border: 1.5px solid var(--line-strong); background: var(--surface);
+}
+.label-btn.is-big span { display: flex; flex-direction: column; align-items: flex-start; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; line-height: 1.2; }
+.label-btn.is-big b { font-size: 15px; letter-spacing: 0; text-transform: none; color: var(--ink); }
+.label-btn.is-big.lb-offen svg { opacity: 1; }
+.label-btn.is-big.lb-bestellt { border-color: var(--lb-orange); background: var(--lb-orange-bg); }
+.label-btn.is-big.lb-bestellt b { color: var(--lb-orange); }
+.label-btn.is-big.lb-gedruckt { border-color: var(--st-fertig-solid); background: var(--st-fertig-bg); }
+.label-btn.is-big.lb-gedruckt span, .label-btn.is-big.lb-gedruckt b { color: var(--st-fertig-ink); }
+.label-btn.is-big.lb-gedruckt svg circle { fill: var(--st-fertig-bg); stroke: var(--st-fertig-bg); }

@@ -1,7 +1,8 @@
 // Datenhaltung: Firebase Firestore (online, für alle Mitarbeiter gemeinsam, mit Offline-Cache).
 //
 // Struktur:
-//   orders/{id}     { nr, articleId, note, status, after, bestellnr, menge }
+//   orders/{id}     { nr, articleId, note, status, after, bestellnr, menge, labels, labelsAt }
+//                   labels: Etiketten „“ (noch nichts) | „bestellt“ | „gedruckt“
 //                   nr: die 6 Ziffern nach „630-“ (auf dem Lieferschein steht „630-“ davor)
 //                   menge: Satz, die zum Auftrag gehören (optional)
 //                   status: „neu“ (nicht begonnen) | „naechstes“ (als nächstes) | „arbeit“ (in Arbeit)
@@ -203,6 +204,19 @@ export function setOrderStatus(id, status, { after = '' } = {}) {
 export const nextOrders = (id) => orders()
   .filter((o) => o.after === id && orderStatus(o) === 'naechstes')
   .sort((a, b) => (a.queuedAt || '').localeCompare(b.queuedAt || ''));
+
+/** Etiketten eines Auftrags: '' → 'bestellt' → 'gedruckt' → '' */
+export const LABEL_STATES = ['', 'bestellt', 'gedruckt'];
+export const labelState = (o) => (LABEL_STATES.includes(o?.labels) ? o.labels : '');
+export const nextLabelState = (o) => LABEL_STATES[(LABEL_STATES.indexOf(labelState(o)) + 1) % LABEL_STATES.length];
+export function setOrderLabels(id, state) {
+  const o = getOrder(id);
+  if (!o || !LABEL_STATES.includes(state)) return;
+  const fields = { labels: state, labelsAt: now(), updatedAt: now() };
+  run(updateDoc(doc(db, 'orders', id), fields));
+  Object.assign(o, fields);
+  emit();
+}
 
 export function saveOrder({ id, nr, note, articleName, status = 'neu', after = '', bestellnr = '', menge = '' }) {
   nr = shortNr(nr).replace(/\s/g, '');

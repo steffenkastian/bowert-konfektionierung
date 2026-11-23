@@ -9,7 +9,7 @@ import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 import { deliveryPdf } from './lieferschein.js';
 import { fillUmlagerung, readTemplate, loadFflate, digits } from './umlagerung.js';
 
-const APP_VERSION = '3.5.0';
+const APP_VERSION = '3.6.0';
 // Abrechnungs-App (abrechnung/index.html): eigenes Konto, zusätzlich Umsatz, Preise, Rechnungen.
 const IS_BILLING = store.IS_BILLING;
 const billing = IS_BILLING ? await import('./abrechnung.js') : null;
@@ -390,7 +390,18 @@ function orderRow(o) {
     sub: (a ? esc(sub) : `<span class="warn-text">kein Artikel</span>${o.note ? ` · ${esc(o.note)}` : ''}`)
       + (ref ? `<span class="next-ref">${esc(ref)}</span>` : ''),
     tag: statusPill(o),
-  });
+  }).replace('<li>', `<li class="order-li">${labelButton(o)}`);
+}
+
+// ---------- Etiketten: antippen → bestellt (orange) → gedruckt (grün) → noch nichts ----------
+
+const LABEL_TEXT = { '': 'Etiketten offen', bestellt: 'Etiketten bestellt', gedruckt: 'Etiketten gedruckt' };
+function labelButton(o, { big = false } = {}) {
+  const st = store.labelState(o);
+  const next = LABEL_TEXT[store.nextLabelState(o)].replace('Etiketten ', '');
+  return `<button type="button" class="label-btn${big ? ' is-big' : ''} lb-${st || 'offen'}" data-label="${o.id}"
+    aria-label="Auftrag ${esc(o.nr)}: ${LABEL_TEXT[st]} – antippen: ${next}" title="${LABEL_TEXT[st]}">
+    ${icon.label}${big ? `<span>Etiketten<b>${st || 'offen'}</b></span>` : ''}</button>`;
 }
 
 function articleRow(a) {
@@ -689,11 +700,14 @@ function viewOrder(id) {
     tab: 'auftraege',
     action: editAction(`#/auftrag/${o.id}/bearbeiten`, 'Auftrag bearbeiten'),
     html: `
-      <div class="detail-head">
-        <span class="eyebrow">Auftrag</span>
-        <div class="detail-title">${nrHtml(o.nr)}</div>
-        ${o.bestellnr ? `<div class="detail-sub">Bestellnummer ${esc(o.bestellnr)}</div>` : ''}
-        ${o.note ? `<div class="detail-sub">${esc(o.note)}</div>` : ''}
+      <div class="detail-head has-side">
+        <div class="detail-main">
+          <span class="eyebrow">Auftrag</span>
+          <div class="detail-title">${nrHtml(o.nr)}</div>
+          ${o.bestellnr ? `<div class="detail-sub">Bestellnummer ${esc(o.bestellnr)}</div>` : ''}
+          ${o.note ? `<div class="detail-sub">${esc(o.note)}</div>` : ''}
+        </div>
+        ${labelButton(o, { big: true })}
       </div>
       ${statusSeg(store.orderStatus(o))}
       <div id="after-pick"></div>
@@ -2170,6 +2184,19 @@ const uploadInput = Object.assign(document.createElement('input'), {
 });
 document.body.append(uploadInput);
 let uploadTarget = null;
+
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-label]');
+  if (!b) return;
+  e.preventDefault();
+  const o = store.getOrder(b.dataset.label);
+  if (!o) return;
+  const prev = store.labelState(o);
+  const st = store.nextLabelState(o);
+  store.setOrderLabels(o.id, st);
+  navigator.vibrate?.(15);
+  toast(`${o.nr}: ${LABEL_TEXT[st]}`, 'ok', { label: 'Rückgängig', run: () => store.setOrderLabels(o.id, prev) });
+});
 
 document.addEventListener('click', (e) => {
   const b = e.target.closest('[data-upload]');
