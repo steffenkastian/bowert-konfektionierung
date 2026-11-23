@@ -9,7 +9,7 @@ import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 import { deliveryPdf } from './lieferschein.js';
 import { fillUmlagerung, readTemplate, loadFflate, digits } from './umlagerung.js';
 
-const APP_VERSION = '3.6.0';
+const APP_VERSION = '3.7.0';
 // Abrechnungs-App (abrechnung/index.html): eigenes Konto, zusätzlich Umsatz, Preise, Rechnungen.
 const IS_BILLING = store.IS_BILLING;
 const billing = IS_BILLING ? await import('./abrechnung.js') : null;
@@ -288,9 +288,9 @@ function nextRef(o) {
 const orderSummary = (o) => [store.getArticle(o.articleId)?.name, o.note].filter(Boolean).join(' · ');
 
 /** Listenzeile; title/sub/tag werden bereits escaped übergeben. */
-function row({ href, title, sub = '', tag = '' }) {
+function row({ href, title, sub = '', tag = '', extra = '' }) {
   return `<li><a class="row" href="${href}">
-    <span class="row-main"><span class="row-title">${title}</span>${sub ? `<span class="row-sub">${sub}</span>` : ''}</span>
+    <span class="row-main"><span class="row-title">${title}</span>${sub ? `<span class="row-sub">${sub}</span>` : ''}${extra}</span>
     ${tag}${icon.chevron}</a></li>`;
 }
 
@@ -390,6 +390,7 @@ function orderRow(o) {
     sub: (a ? esc(sub) : `<span class="warn-text">kein Artikel</span>${o.note ? ` · ${esc(o.note)}` : ''}`)
       + (ref ? `<span class="next-ref">${esc(ref)}</span>` : ''),
     tag: statusPill(o),
+    extra: miniBar(o),
   }).replace('<li>', `<li class="order-li">${labelButton(o)}`);
 }
 
@@ -1271,6 +1272,15 @@ function progressHtml(o) {
       ${p.total && p.total > p.done ? `<span class="lg">noch ${fmtN(p.total - p.done)}</span>` : ''}
     </div>
   </div>`;
+}
+
+/** Schmaler Balken für Listenzeilen (nur mit Auftragsmenge): grün auf Lieferscheinen, orange gesammelt. */
+function miniBar(o) {
+  const p = store.orderProgress(o.id);
+  if (!p.total) return '';
+  const d = Math.min(100, (p.delivered / p.total) * 100);
+  const op = Math.max(0, Math.min(100 - d, (p.open / p.total) * 100));
+  return `<span class="mini-bar" aria-hidden="true"><span class="bar-done" style="width:${d}%"></span><span class="bar-open" style="width:${op}%"></span></span>`;
 }
 
 /** Kurzform für Listen: „1.200 / 5.000 Satz“. */
