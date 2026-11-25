@@ -5,3 +5,6 @@ Thumbs.db
 
 # Alte Python-Vorlagen (enthalten Zugangsdaten) – nicht veröffentlichen
 AlteVorlagen/
+
+# Kunden-Bestellungen (Beispiele) – nicht veröffentlichen
+Vorlage_Bestellung/

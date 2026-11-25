@@ -89,7 +89,7 @@ export async function prepareUpload(file) {
 // ---------- PDF anzeigen (pdf.js, wird erst bei Bedarf geladen) ----------
 
 let pdfjs = null;
-async function loadPdfJs() {
+export async function loadPdfJs() {
   if (!pdfjs) {
     pdfjs = await import('../vendor/pdfjs/pdf.min.js');
     pdfjs.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.min.js', import.meta.url).href;

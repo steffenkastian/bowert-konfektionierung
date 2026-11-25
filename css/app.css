@@ -968,3 +968,21 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 36px;
 
 /* ---------- Mini-Fortschrittsbalken in Auftragszeilen ---------- */
 .mini-bar { display: flex; width: 170px; max-width: 100%; height: 4px; margin-top: 6px; border-radius: 99px; background: var(--seg-bg); overflow: hidden; }
+
+/* ---------- Bestellung einlesen ---------- */
+.btn-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.btn-pair .btn { min-width: 0; padding-left: 10px; padding-right: 10px; }
+.imp-link { margin-bottom: 14px; }
+.imp-drop.is-over { outline: 2px dashed var(--primary); outline-offset: -6px; }
+.imp-drop.is-busy .imp-pick { opacity: 0.5; pointer-events: none; }
+.imp-file { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.imp-file > svg { width: 26px; height: 26px; flex: none; color: var(--muted); }
+.imp-file-name { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.imp-file-name b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.imp-file-name small { color: var(--muted); font-size: 13.5px; }
+.btn-small { min-height: 38px; padding: 6px 12px; font-size: 14px; flex: none; }
+.imp-list .pick-row { padding-left: 16px; }
+.imp-list .pick-row .tag { flex: none; }
+.imp-thumb { width: 48px; height: 48px; flex: none; border-radius: 8px; border: 1px solid var(--line); object-fit: cover; object-position: top;
+  display: inline-flex; align-items: center; justify-content: center; color: var(--muted); background: #fff; }
+.imp-thumb svg { width: 22px; height: 22px; }

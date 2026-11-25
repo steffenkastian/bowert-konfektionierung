@@ -9,7 +9,7 @@ import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 import { deliveryPdf } from './lieferschein.js';
 import { fillUmlagerung, readTemplate, loadFflate, digits } from './umlagerung.js';
 
-const APP_VERSION = '3.8.0';
+const APP_VERSION = '3.9.0';
 // Abrechnungs-App (abrechnung/index.html): eigenes Konto, zusätzlich Umsatz, Preise, Rechnungen.
 const IS_BILLING = store.IS_BILLING;
 const billing = IS_BILLING ? await import('./abrechnung.js') : null;
@@ -145,6 +145,7 @@ const routes = [
   [route(`suche${Q}`), () => viewSearch()],
   [route(`auftraege${Q}`), () => viewOrders()],
   [route(`auftrag/neu${Q}`), (q) => viewOrderEdit(null, q)],
+  [route('bestellung'), () => viewOrderImport()],
   [route(`auftrag/${ID}/bearbeiten`), (id) => viewOrderEdit(id)],
   [route(`auftrag/${ID}`), (id) => viewOrder(id)],
   [route(`artikel${Q}`), (q) => viewArticles(q)],
@@ -645,7 +646,8 @@ function searchHome() {
     ${recent.length ? `${sectionTitle('Zuletzt angesehen')}<ul class="card list">${recent.map(orderRow).join('')}</ul>` : ''}
     ${!working.length && !queued.length && !recent.length ? '<p class="hint center">Auftragsnummer, Artikelbezeichnung, Artikelnummer oder Lagerort eintippen.</p>' : ''}
     ${todo.length ? `${sectionTitle('Zu erledigen')}<ul class="card list">${todo.join('')}</ul>` : ''}
-    <a class="btn btn-secondary btn-block" href="#/auftrag/neu">${icon.plus}<span>Neuer Auftrag</span></a>`;
+    <div class="btn-pair"><a class="btn btn-secondary" href="#/auftrag/neu">${icon.plus}<span>Neuer Auftrag</span></a>
+      <a class="btn btn-secondary" href="#/bestellung">${icon.pdf}<span>Bestell-PDF</span></a></div>`;
 }
 
 // ======================================================================
@@ -891,6 +893,7 @@ function viewOrderEdit(id, query) {
     tab: 'auftraege',
     form: true,
     html: `
+      ${o ? '' : `<a class="btn btn-secondary btn-block imp-link" href="#/bestellung">${icon.pdf}<span>Aus Bestell-PDF einlesen</span></a>`}
       <form class="card form" id="f" novalidate>
         <div class="field">
           <label for="nr">Auftragsnummer</label>
@@ -999,6 +1002,265 @@ function viewOrderEdit(id, query) {
 const pageSeg = (current) => `<nav class="seg page-seg" aria-label="Ansicht">
   <a href="#/artikel" aria-pressed="${current === 'artikel'}">Artikel</a>
   <a href="#/material" aria-pressed="${current === 'material'}">Material</a></nav>`;
+
+// ======================================================================
+// Bestellung (PDF) einlesen: Auftrag + Artikel + Materialien + Pläne in einem Schritt
+// ======================================================================
+
+let imp = null; // { fileName, bytes, numPages, d, thumbs, choice, picked, form } – bleibt bis zum Übernehmen erhalten
+const materialByDigits = (d) => (d ? store.materials().find((m) => digits(m.nr) === d) : undefined);
+const articleByArtNr = (nr) => (nr ? store.findArticleByNr(nr) || store.articles().find((a) => digits(a.artNr) && digits(a.artNr) === nr) : undefined);
+
+/** Ziel-Artikel: per Artikelnummer gefunden, gewählter vorhandener oder null (= neu anlegen). */
+function impTarget() {
+  return articleByArtNr(imp.d.artNr) || (imp.choice ? store.getArticle(imp.choice) : null) || null;
+}
+
+/** Vorhandene Artikel ohne Nummer, nach Anzahl passender Materialien sortiert. */
+function impCandidates() {
+  const want = new Set(imp.d.bom.map((b) => b.nr));
+  return store.articles().filter((a) => !a.artNr)
+    .map((a) => ({ a, hits: store.articleMaterials(a).filter((m) => want.has(digits(m.nr))).length }))
+    .sort((x, y) => y.hits - x.hits || natCmp(x.a.name, y.a.name));
+}
+
+function impMaterialRows(target) {
+  const have = new Set(store.articleMaterials(target).map((m) => digits(m.nr)));
+  return imp.d.bom.map((b) => {
+    const known = materialByDigits(b.nr);
+    const attached = have.has(b.nr);
+    const pick = imp.picked.mat[b.nr];
+    const checked = attached || (pick ?? b.type === 'EK');
+    const tag = attached ? '<span class="tag tag-ok">schon dabei</span>'
+      : known ? `<span class="tag">im Lager${known.location ? ` · ${esc(known.location)}` : ''}</span>`
+        : '<span class="tag tag-warn">neu</span>';
+    const kind = b.type === 'EK' ? 'Einkaufsteil' : b.type === 'Fertigung' ? 'Fertigungsteil' : '';
+    return `<label class="pick-row"><input type="checkbox" data-mat="${b.nr}" ${checked ? 'checked' : ''} ${attached ? 'disabled' : ''}>
+      <span class="pick-main"><b>${esc(known?.description || b.description)}</b>
+        <small>${esc([b.display, kind].filter(Boolean).join(' · '))}</small></span>${tag}</label>`;
+  }).join('');
+}
+
+function impPlanRows(target) {
+  const names = new Set(store.articleFiles(target).map((f) => norm(f.name)));
+  return imp.d.plans.map((p, i) => {
+    const exists = names.has(norm(p.name));
+    const checked = imp.picked.plan[i] ?? !exists;
+    return `<label class="pick-row"><input type="checkbox" data-plan="${i}" ${checked ? 'checked' : ''}>
+      ${imp.thumbs[i] ? `<img class="imp-thumb" src="${imp.thumbs[i]}" alt="">` : `<span class="imp-thumb">${icon.pdf}</span>`}
+      <span class="pick-main"><b>${esc(p.name)}</b>
+        <small>${esc(`${p.pages.length === 1 ? 'Seite' : 'Seiten'} ${p.pages.join(', ')}${p.nr ? ` · ${p.nr}` : ''}`)}</small></span>
+      ${exists ? '<span class="tag tag-ok">schon da</span>' : ''}</label>`;
+  }).join('');
+}
+
+function impArticleBox(target) {
+  const d = imp.d;
+  const diff = (a) => [
+    d.perPallet && a.perPallet && a.perPallet !== d.perPallet
+      ? `<p class="notice notice-soft">Laut Bestellung ${fmtN(d.perPallet)} Satz pro Palette, am Artikel ${fmtN(a.perPallet)} – wird nicht geändert.</p>` : '',
+    d.perPallet && !a.perPallet ? `<p class="hint">Satz pro Palette fehlt am Artikel – wird mit ${fmtN(d.perPallet)} ergänzt.</p>` : '',
+  ].join('');
+  const byNr = articleByArtNr(d.artNr);
+  if (byNr) {
+    return `<p class="notice notice-ok">Artikelnummer ${esc(d.artNr)} gibt es schon: <a href="#/artikel/${byNr.id}"><b>${esc(byNr.name)}</b></a></p>${diff(byNr)}`;
+  }
+  const cands = impCandidates();
+  const opts = cands.map(({ a, hits }) => `<option value="${a.id}"${imp.choice === a.id ? ' selected' : ''}>${esc(a.name)}${hits ? ` (${plural(hits, 'Material passt', 'Materialien passen')})` : ''}</option>`).join('');
+  return `
+    <div class="field">
+      <label for="imp-choice">Artikelnummer ${esc(d.artNr || '–')} ist noch unbekannt</label>
+      <select id="imp-choice" class="input">
+        <option value="">Neuen Artikel anlegen</option>
+        ${opts ? `<optgroup label="Vorhandenem Artikel die Nummer geben">${opts}</optgroup>` : ''}
+      </select>
+      ${!imp.choice && cands[0]?.hits >= 2 ? `<p class="hint">Vorschlag: <b>${esc(cands[0].a.name)}</b> hat schon ${cands[0].hits} dieser Materialien – evtl. derselbe Artikel.</p>` : ''}
+    </div>
+    ${target ? `<p class="hint">„${esc(target.name)}“ bekommt die Artikelnummer ${esc(d.artNr)}.</p>${diff(target)}` : `
+      ${field({ id: 'imp-name', label: 'Artikelbezeichnung', value: imp.form?.name ?? d.name, attrs: 'autocomplete="off" autocorrect="off" spellcheck="false"' })}
+      <div class="two-col">
+        ${field({ id: 'imp-artnr', label: 'Artikelnummer', value: imp.form?.artNr ?? d.artNr, attrs: CODE_ATTRS })}
+        ${field({ id: 'imp-per', label: 'Satz pro Palette', value: imp.form?.per ?? d.perPallet ?? '', attrs: 'inputmode="numeric" autocomplete="off"' })}
+      </div>`}`;
+}
+
+function impPriceNote(target) {
+  const d = imp.d;
+  if (!IS_BILLING || !d.price) return '';
+  const cur = target ? store.currentPrice(target.id) : null;
+  const t = (n) => n.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  if (cur == null) return `<p class="notice notice-soft">Preis laut Bestellung: <b>${t(d.price)} €</b> je Satz – am Artikel ist noch kein Preis hinterlegt.</p>`;
+  if (Math.abs(cur - d.price) > 0.00005) return `<p class="notice notice-soft">Preis laut Bestellung <b>${t(d.price)} €</b>, am Artikel <b>${t(cur)} €</b> je Satz – wird nicht geändert.</p>`;
+  return `<p class="hint">Preis ${t(d.price)} € je Satz stimmt mit dem Artikel überein.</p>`;
+}
+
+function viewOrderImport() {
+  const base = { title: 'Bestellung einlesen', back: '#/auftraege', tab: 'auftraege', form: true };
+  if (!imp) {
+    return {
+      ...base,
+      html: `
+        <div class="card box imp-drop" id="drop">
+          <p>Eppendorf-Bestellung als PDF wählen. Die App liest <b>Auftrag, Bestellnummer, Menge und Artikel</b>,
+            schlägt die <b>Materialien aus der Stückliste</b> vor und legt <b>Beladungsplan und Packplan</b> als Packhinweise ab.</p>
+          <p class="hint">Vor dem Anlegen wird alles angezeigt und kann geändert werden.</p>
+          <label class="btn btn-primary btn-block imp-pick">${icon.pdf}<span>Bestell-PDF wählen</span>
+            <input type="file" id="imp-file" accept="application/pdf,.pdf" hidden></label>
+          <p class="form-error" id="err" role="alert"></p>
+        </div>`,
+      mount(root) {
+        const drop = $('#drop', root);
+        const read = async (file) => {
+          if (!file) return;
+          const err = $('#err', root);
+          err.textContent = '';
+          if (!(isPdf(file) || /\.pdf$/i.test(file.name))) { err.textContent = 'Bitte eine PDF-Datei wählen.'; return; }
+          drop.classList.add('is-busy');
+          err.innerHTML = '<span class="spinner small"></span> PDF wird gelesen …';
+          try {
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            const { readPdfText, parseOrderPages, pdfThumb } = await import('./bestellung.js');
+            const t = await readPdfText(bytes);
+            const d = parseOrderPages(t.pages, file.name);
+            if (!d.nr && !d.artNr && !d.bom.length) throw new Error('In diesem PDF wurde keine Bestellung erkannt (kein Auftrag, kein Artikel, keine Stückliste).');
+            const thumbs = await Promise.all(d.plans.map((p) => pdfThumb(bytes, p.pages[0]).catch(() => '')));
+            imp = { fileName: file.name, bytes, numPages: t.numPages, d, thumbs, choice: '', picked: { mat: {}, plan: {} }, form: null };
+            const cands = impCandidates();
+            if (!impTarget() && cands[0]?.hits >= 3) imp.choice = cands[0].a.id; // ziemlich sicher derselbe Artikel
+            render();
+          } catch (ex) {
+            err.textContent = ex.message || String(ex);
+            drop.classList.remove('is-busy');
+          }
+        };
+        $('#imp-file', root).addEventListener('change', (e) => read(e.target.files[0]));
+        drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('is-over'); });
+        drop.addEventListener('dragleave', () => drop.classList.remove('is-over'));
+        drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('is-over'); read(e.dataTransfer.files[0]); });
+      },
+    };
+  }
+
+  const d = imp.d;
+  const existing = d.nr ? store.findOrderByNr(imp.form?.nr ?? d.nr) : null;
+  const target = impTarget();
+  return {
+    ...base,
+    html: `
+      <div class="card imp-file">${icon.pdf}<span class="imp-file-name"><b>${esc(imp.fileName)}</b><small>${plural(imp.numPages, 'Seite', 'Seiten')}</small></span>
+        <button type="button" class="btn btn-secondary btn-small" id="imp-reset">Andere Datei</button></div>
+
+      ${sectionTitle('Auftrag')}
+      <div class="card form">
+        <div class="field">
+          <label for="imp-nr">Auftragsnummer</label>
+          <div class="input-prefix"><span>${store.ORDER_PREFIX}</span>
+            <input id="imp-nr" class="input" value="${esc(imp.form?.nr ?? d.nr)}" maxlength="12" inputmode="numeric" ${CODE_ATTRS}></div>
+        </div>
+        <div class="two-col">
+          ${field({ id: 'imp-menge', label: 'Satz im Auftrag', value: imp.form?.menge ?? d.menge ?? '', attrs: 'inputmode="numeric" autocomplete="off"' })}
+          ${field({ id: 'imp-best', label: 'Bestellnummer', value: imp.form?.best ?? d.bestellnr, attrs: CODE_ATTRS })}
+        </div>
+        ${existing ? `<p class="notice">Auftrag <a href="#/auftrag/${existing.id}"><b>${esc(existing.nr)}</b></a> gibt es schon (${STATUS_LABEL[store.orderStatus(existing)]}).
+          Übernommen werden Bestellnummer, Menge und Artikel – Status, Etiketten und gemeldete Paletten bleiben.</p>` : ''}
+        ${impPriceNote(target)}
+      </div>
+
+      ${sectionTitle('Artikel')}
+      <div class="card form" id="imp-art">${impArticleBox(target)}</div>
+
+      ${d.bom.length ? `${sectionTitle('Materialien aus der Stückliste', d.bom.length)}
+        <div class="card pick-list imp-list" id="imp-mats">${impMaterialRows(target)}</div>
+        <p class="hint">Vorab angehakt sind die Einkaufsteile. Neues Material wird ohne Lagerort angelegt, vorhandenes behält seinen Lagerort.</p>` : ''}
+
+      ${d.plans.length ? `${sectionTitle('Pläne als Packhinweise', d.plans.length)}
+        <div class="card pick-list imp-list" id="imp-plans">${impPlanRows(target)}</div>` : '<p class="hint">Kein Beladungsplan / Packplan im PDF gefunden.</p>'}
+
+      <p class="form-error" id="err" role="alert"></p>
+      <button type="button" class="btn btn-primary btn-block" id="imp-go">${icon.check}<span>${existing ? 'Übernehmen' : 'Alles anlegen'}</span></button>`,
+    mount(root) {
+      const keepForm = () => {
+        imp.form = {
+          nr: $('#imp-nr', root).value, menge: $('#imp-menge', root).value, best: $('#imp-best', root).value,
+          name: $('#imp-name', root)?.value ?? imp.form?.name, artNr: $('#imp-artnr', root)?.value ?? imp.form?.artNr,
+          per: $('#imp-per', root)?.value ?? imp.form?.per,
+        };
+      };
+      const rerender = () => { keepForm(); const y = window.scrollY; render(); window.scrollTo(0, y); };
+      root.addEventListener('change', (e) => {
+        const el = e.target;
+        if (el.dataset.mat) imp.picked.mat[el.dataset.mat] = el.checked;
+        if (el.dataset.plan) imp.picked.plan[el.dataset.plan] = el.checked;
+        if (el.id === 'imp-choice') { imp.choice = el.value; imp.picked = { mat: {}, plan: {} }; rerender(); }
+        if (el.id === 'imp-nr') rerender();
+      });
+      $('#imp-reset', root).addEventListener('click', () => { imp = null; render(); });
+      $('#imp-go', root).addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        const err = $('#err', root);
+        err.textContent = '';
+        keepForm();
+        const f = imp.form;
+        try {
+          // Erst alles prüfen, dann schreiben.
+          const nr = store.shortNr(f.nr).replace(/\s/g, '');
+          if (!/^\d{6}$/.test(nr)) throw new Error('Die Auftragsnummer hat 6 Ziffern, z. B. 231156.');
+          const menge = store.parseCount(f.menge, 'Satz im Auftrag');
+          const order = store.findOrderByNr(nr);
+          let art = impTarget();
+          let artFields = null;
+          if (!art) {
+            const name = String(f.name || '').trim();
+            const artNr = String(f.artNr || '').trim();
+            if (!name) throw new Error('Bitte eine Artikelbezeichnung eingeben.');
+            const dupe = store.findArticleByName(name);
+            if (dupe) throw new Error(`Artikel „${dupe.name}“ gibt es schon – oben „Vorhandenem Artikel die Nummer geben“ wählen oder anders benennen.`);
+            if (articleByArtNr(digits(artNr)) || store.findArticleByNr(artNr)) throw new Error(`Die Artikelnummer ${artNr} ist schon vergeben.`);
+            const per = store.parseCount(f.per, 'Satz pro Palette');
+            if (per === 0) throw new Error('Satz pro Palette: bitte mindestens 1 eingeben (oder leer lassen).');
+            artFields = { name, artNr, perPallet: f.per };
+          }
+          const mats = $$('[data-mat]:checked:not(:disabled)', root).map((el) => imp.d.bom.find((b) => b.nr === el.dataset.mat));
+          const plans = $$('[data-plan]:checked', root).map((el) => Number(el.dataset.plan));
+
+          btn.disabled = true;
+          err.innerHTML = '<span class="spinner small"></span> Wird angelegt …';
+          // 1. Artikel (vorhandener: nur Nummer und ggf. fehlenden Satz pro Palette ergänzen)
+          if (artFields) art = store.saveArticle(artFields);
+          else if (!art.artNr || (!art.perPallet && imp.d.perPallet)) {
+            art = store.saveArticle({ id: art.id, name: art.name, artNr: art.artNr || imp.d.artNr,
+              perPallet: art.perPallet || imp.d.perPallet || '', lsText: art.lsText || '' });
+          }
+          // 2. Materialien (vorhandene behalten Beschreibung und Lagerort)
+          for (const b of mats) {
+            const m = materialByDigits(b.nr);
+            store.addMaterialToArticle(art.id, m
+              ? { nr: m.nr, description: m.description || b.description, location: m.location || '' }
+              : { nr: b.nr, description: b.description, location: '' });
+          }
+          // 3. Pläne als eigene PDFs
+          const { extractPages } = await import('./bestellung.js');
+          for (const i of plans) {
+            const p = imp.d.plans[i];
+            const blob = await extractPages(imp.bytes, p.pages);
+            await store.addArticleFile(art.id, { blob, name: p.name, type: 'application/pdf', thumb: imp.thumbs[i] || '' });
+          }
+          // 4. Auftrag
+          const saved = order
+            ? store.saveOrder({ id: order.id, nr: order.nr, note: order.note, articleName: art.name, status: store.orderStatus(order),
+              after: order.after || '', bestellnr: f.best, menge: menge ?? '' })
+            : store.saveOrder({ nr, articleName: art.name, bestellnr: f.best, menge: menge ?? '', status: 'neu' });
+          toast(`Auftrag ${saved.nr} eingelesen · ${plural(mats.length, 'Material', 'Materialien')} · ${plural(plans.length, 'Plan', 'Pläne')}`);
+          imp = null;
+          replace(`#/auftrag/${saved.id}`);
+        } catch (ex) {
+          btn.disabled = false;
+          err.textContent = ex.message || String(ex);
+        }
+      });
+    },
+  };
+}
 
 function viewArticles(query) {
   const onlyOpen = new URLSearchParams(query || '').get('offen') === '1';
