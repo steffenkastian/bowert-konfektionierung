@@ -9,7 +9,7 @@ import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 import { deliveryPdf } from './lieferschein.js';
 import { fillUmlagerung, readTemplate, loadFflate, digits } from './umlagerung.js';
 
-const APP_VERSION = '3.9.0';
+const APP_VERSION = '3.9.1';
 // Abrechnungs-App (abrechnung/index.html): eigenes Konto, zusätzlich Umsatz, Preise, Rechnungen.
 const IS_BILLING = store.IS_BILLING;
 const billing = IS_BILLING ? await import('./abrechnung.js') : null;
@@ -1030,7 +1030,7 @@ function impMaterialRows(target) {
     const known = materialByDigits(b.nr);
     const attached = have.has(b.nr);
     const pick = imp.picked.mat[b.nr];
-    const checked = attached || (pick ?? b.type === 'EK');
+    const checked = attached || (pick ?? false);
     const tag = attached ? '<span class="tag tag-ok">schon dabei</span>'
       : known ? `<span class="tag">im Lager${known.location ? ` · ${esc(known.location)}` : ''}</span>`
         : '<span class="tag tag-warn">neu</span>';
@@ -1171,7 +1171,7 @@ function viewOrderImport() {
 
       ${d.bom.length ? `${sectionTitle('Materialien aus der Stückliste', d.bom.length)}
         <div class="card pick-list imp-list" id="imp-mats">${impMaterialRows(target)}</div>
-        <p class="hint">Vorab angehakt sind die Einkaufsteile. Neues Material wird ohne Lagerort angelegt, vorhandenes behält seinen Lagerort.</p>` : ''}
+        <p class="hint">Gewünschte Materialien anhaken. Neues Material wird ohne Lagerort angelegt, vorhandenes behält seinen Lagerort.</p>` : ''}
 
       ${d.plans.length ? `${sectionTitle('Pläne als Packhinweise', d.plans.length)}
         <div class="card pick-list imp-list" id="imp-plans">${impPlanRows(target)}</div>` : '<p class="hint">Kein Beladungsplan / Packplan im PDF gefunden.</p>'}
