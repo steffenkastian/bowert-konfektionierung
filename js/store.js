@@ -8,7 +8,8 @@
 //                   status: „neu“ (nicht begonnen) | „naechstes“ (als nächstes) | „arbeit“ (in Arbeit)
 //                           | „fertig“ (abgeschlossen)
 //                   after: bei „naechstes“ die ID des laufenden Auftrags, nach dem er drankommt („“ = keiner)
-//   articles/{id}   { name, materialIds: [], files: [], perPallet, lsText }
+//   articles/{id}   { name, artNr, materialIds: [], files: [], perPallet, lsText }
+//                   artNr = Artikelnummer (optional, eindeutig)
 //                   Artikelbezeichnung (z. B. „5er“) → Materialien; perPallet = Satz pro Palette,
 //                   lsText = Text auf dem Lieferschein (leer → „Konfektionierung - <Bezeichnung>“)
 //                   files: Packhinweise (Foto/PDF) als { id, name, type, size, parts, thumb, createdAt }
@@ -164,6 +165,9 @@ export function parseCount(v, label = 'Menge') {
   return Number(t);
 }
 export const findArticleByName = (name) => (norm(name) ? articles().find((a) => norm(a.name) === norm(name)) : undefined);
+export const findArticleByNr = (nr) => (norm(nr) ? articles().find((a) => norm(a.artNr) === norm(nr)) : undefined);
+/** Artikel zu einer Eingabe – Bezeichnung oder Artikelnummer. */
+export const findArticle = (q) => findArticleByName(q) || findArticleByNr(q);
 export const findMaterialByNr = (nr) => (norm(nr) ? materials().find((m) => norm(m.nr) === norm(nr)) : undefined);
 
 export const articleMaterials = (a) => (a?.materialIds || []).map(getMaterial).filter(Boolean);
@@ -229,7 +233,7 @@ export function saveOrder({ id, nr, note, articleName, status = 'neu', after = '
   if (dupe && dupe.id !== id) throw new Error(`Auftrag ${dupe.nr} gibt es schon.`);
 
   const batch = writeBatch(db);
-  let article = findArticleByName(articleName);
+  let article = findArticle(articleName);
   if (!article) {
     article = { id: newId('articles'), name: articleName, materialIds: [], createdAt: now(), updatedAt: now() };
     batch.set(doc(db, 'articles', article.id), withoutId(article));
@@ -267,15 +271,18 @@ export function deleteOrder(id) {
 
 export const lsTextOf = (a) => str(a?.lsText) || (a ? `Konfektionierung - ${a.name}` : '');
 
-export function saveArticle({ id, name, perPallet = '', lsText = '' }) {
+export function saveArticle({ id, name, artNr = '', perPallet = '', lsText = '' }) {
   name = str(name);
+  artNr = str(artNr);
   if (!name) throw new Error('Bitte eine Artikelbezeichnung eingeben.');
   const dupe = findArticleByName(name);
   if (dupe && dupe.id !== id) throw new Error(`Artikel „${dupe.name}“ gibt es schon.`);
+  const nrDupe = findArticleByNr(artNr);
+  if (nrDupe && nrDupe.id !== id) throw new Error(`Die Artikelnummer ${artNr} hat schon „${nrDupe.name}“.`);
   const per = parseCount(perPallet, 'Satz pro Palette');
   if (per === 0) throw new Error('Satz pro Palette: bitte mindestens 1 eingeben (oder leer lassen).');
   const articleId = id || newId('articles');
-  const fields = { name, perPallet: per, lsText: str(lsText), updatedAt: now() };
+  const fields = { name, artNr, perPallet: per, lsText: str(lsText), updatedAt: now() };
   if (!id) Object.assign(fields, { materialIds: [], createdAt: now() });
   run(setDoc(doc(db, 'articles', articleId), fields, { merge: true }));
   data.articles.set(articleId, { materialIds: [], ...data.articles.get(articleId), id: articleId, ...fields });

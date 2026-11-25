@@ -9,7 +9,7 @@ import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 import { deliveryPdf } from './lieferschein.js';
 import { fillUmlagerung, readTemplate, loadFflate, digits } from './umlagerung.js';
 
-const APP_VERSION = '3.7.0';
+const APP_VERSION = '3.8.0';
 // Abrechnungs-App (abrechnung/index.html): eigenes Konto, zusätzlich Umsatz, Preise, Rechnungen.
 const IS_BILLING = store.IS_BILLING;
 const billing = IS_BILLING ? await import('./abrechnung.js') : null;
@@ -372,7 +372,7 @@ function articleCard(a, { primary = false } = {}) {
   const shown = ords.slice(0, 6).map((o) => `<a href="#/auftrag/${o.id}">${esc(o.nr)}</a>`).join(', ');
   return `<article class="card">
     <a class="card-head" href="#/artikel/${a.id}"${primary ? ' data-primary' : ''}>
-      <span class="card-head-main"><span class="eyebrow">Artikel</span><span class="card-title">${esc(a.name)}</span></span>
+      <span class="card-head-main"><span class="eyebrow">Artikel</span><span class="card-title">${esc(a.name)}</span>${a.artNr ? `<span class="card-sub">Nr. ${esc(a.artNr)}</span>` : ''}</span>
       ${icon.chevron}
     </a>
     <div class="art">${filesBlock(a)}${materialList(a)}</div>
@@ -412,7 +412,7 @@ function articleRow(a) {
   return row({
     href: `#/artikel/${a.id}`,
     title: esc(a.name),
-    sub: esc([plural(nMat, 'Material', 'Materialien'), plural(nOrd, 'Auftrag', 'Aufträge'),
+    sub: esc([a.artNr ? `Nr. ${a.artNr}` : '', plural(nMat, 'Material', 'Materialien'), plural(nOrd, 'Auftrag', 'Aufträge'),
       nFiles ? plural(nFiles, 'Packhinweis', 'Packhinweise') : ''].filter(Boolean).join(' · ')),
     tag: nMat ? '' : '<span class="tag">kein Material</span>',
   });
@@ -560,7 +560,7 @@ function searchResults(q) {
   const m = matcher(q);
   const orders = rank(store.orders(), (o) => Math.max(m(o.nr) * 10, m(store.fullNr(o.nr)) * 10, m(o.bestellnr) * 5, m(o.note)),
     (a, b) => natCmp(a.nr, b.nr));
-  const arts = rank(store.articles(), (a) => m(a.name) * 10, (a, b) => natCmp(a.name, b.name));
+  const arts = rank(store.articles(), (a) => Math.max(m(a.name), m(a.artNr)) * 10, (a, b) => natCmp(a.name, b.name));
   const mats = rank(store.materials(), (x) => Math.max(m(x.nr) * 10, m(x.description) * 2, m(x.location) * 2),
     (a, b) => locCmp(a.location, b.location));
 
@@ -897,7 +897,7 @@ function viewOrderEdit(id, query) {
           <div class="input-prefix"><span>${store.ORDER_PREFIX}</span>
             <input id="nr" class="input" value="${esc(o?.nr ?? store.shortNr(presetNr))}" placeholder="231084" maxlength="12" inputmode="numeric" ${CODE_ATTRS} enterkeyhint="next"></div>
         </div>
-        ${field({ id: 'art', label: 'Artikelbezeichnung', value: currentArticle?.name, placeholder: 'suchen, z. B. 5er oder 200er', attrs: 'autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="next"', suggest: true })}
+        ${field({ id: 'art', label: 'Artikel', value: currentArticle?.name, placeholder: 'Bezeichnung oder Artikelnummer', attrs: 'autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="next"', suggest: true })}
         <div id="art-preview"></div>
         <div class="two-col">
           ${field({ id: 'menge', label: 'Satz im Auftrag', optional: true, value: o?.menge ?? '', placeholder: 'z. B. 1872', attrs: 'inputmode="numeric" autocomplete="off" enterkeyhint="next"' })}
@@ -924,7 +924,7 @@ function viewOrderEdit(id, query) {
 
       // Vorschau: welche Materialien hängen an der gewählten Artikelbezeichnung?
       const preview = () => {
-        const a = store.findArticleByName(art.value);
+        const a = store.findArticle(art.value);
         const box = $('#art-preview', root);
         if (a) {
           const mats = sortedMaterials(a);
@@ -941,11 +941,11 @@ function viewOrderEdit(id, query) {
       attachSuggest(art, {
         source: (q) => {
           const m = matcher(q);
-          return rank(store.articles(), (a) => (q.trim() ? m(a.name) : 1), (x, y) => natCmp(x.name, y.name))
-            .filter(({ x }) => norm(x.name) !== norm(q))
+          return rank(store.articles(), (a) => (q.trim() ? Math.max(m(a.name), m(a.artNr)) : 1), (x, y) => natCmp(x.name, y.name))
+            .filter(({ x }) => norm(x.name) !== norm(q) && norm(x.artNr) !== norm(q))
             .map(({ x }) => ({
               label: x.name,
-              sub: plural((x.materialIds || []).length, 'Material', 'Materialien'),
+              sub: [x.artNr ? `Nr. ${x.artNr}` : 'ohne Artikelnummer', plural((x.materialIds || []).length, 'Material', 'Materialien')].join(' · '),
               name: x.name,
             }));
         },
@@ -1015,7 +1015,7 @@ function viewArticles(query) {
         const m = matcher(q);
         let list = store.articles().filter((a) => !onlyOpen || !(a.materialIds || []).length);
         if (q.trim()) {
-          list = list.filter((a) => m(a.name)
+          list = list.filter((a) => m(a.name) || m(a.artNr)
             || store.articleMaterials(a).some((x) => m(x.nr) || m(x.description)));
         }
         list.sort((a, b) => natCmp(a.name, b.name));
@@ -1049,6 +1049,7 @@ function viewArticle(id) {
         <div class="detail-title">${esc(a.name)}</div>
       </div>
       <a class="card kvs kvs-link" href="#/artikel/${a.id}/bearbeiten">
+        <div class="kv"><span>Artikelnummer</span><span>${a.artNr ? `<b>${esc(a.artNr)}</b>` : '<span class="muted">noch keine</span>'}</span></div>
         <div class="kv"><span>Satz pro Palette</span><span>${a.perPallet ? `<b>${fmtN(a.perPallet)}</b>` : '<span class="warn-text">fehlt</span>'}</span></div>
         <div class="kv"><span>Lieferschein-Text</span><span>${esc(store.lsTextOf(a))}</span></div>
       </a>
@@ -1080,6 +1081,7 @@ function viewArticleEdit(id, query) {
     html: `
       <form class="card form" id="f" novalidate>
         ${field({ id: 'name', label: 'Artikelbezeichnung', value: a?.name ?? preset, placeholder: 'z. B. 5er, 200er', attrs: 'autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="next"' })}
+        ${field({ id: 'artnr', label: 'Artikelnummer', optional: true, value: a?.artNr ?? '', placeholder: 'z. B. 100245', attrs: `${CODE_ATTRS} enterkeyhint="next"` })}
         ${field({ id: 'per', label: 'Satz pro Palette', value: a?.perPallet ?? '', placeholder: 'z. B. 144', attrs: 'inputmode="numeric" autocomplete="off" enterkeyhint="next"', hint: 'Für „1 Palette“ beim Fertigmelden.' })}
         <div class="field">
           <label for="lstext">Text auf dem Lieferschein <span class="opt">optional</span></label>
@@ -1092,11 +1094,11 @@ function viewArticleEdit(id, query) {
       ${a ? deleteButton('Artikel löschen') : ''}`,
     mount(root) {
       const name = $('#name', root);
-      nextOnEnter(name, $('#per', root));
+      nextOnEnter(name, $('#artnr', root), $('#per', root));
       $('#f', root).addEventListener('submit', (e) => {
         e.preventDefault();
         try {
-          const saved = store.saveArticle({ id: a?.id, name: name.value, perPallet: $('#per', root).value, lsText: $('#lstext', root).value });
+          const saved = store.saveArticle({ id: a?.id, name: name.value, artNr: $('#artnr', root).value, perPallet: $('#per', root).value, lsText: $('#lstext', root).value });
           toast('Artikel gespeichert');
           if (a) back(`#/artikel/${saved.id}`);
           else replace(`#/artikel/${saved.id}`);
