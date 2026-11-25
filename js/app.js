@@ -9,7 +9,7 @@ import { ACCEPT, prepareUpload, renderPdf, fileSize, isPdf } from './files.js';
 import { deliveryPdf } from './lieferschein.js';
 import { fillUmlagerung, readTemplate, loadFflate, digits } from './umlagerung.js';
 
-const APP_VERSION = '3.9.1';
+const APP_VERSION = '3.9.2';
 // Abrechnungs-App (abrechnung/index.html): eigenes Konto, zusätzlich Umsatz, Preise, Rechnungen.
 const IS_BILLING = store.IS_BILLING;
 const billing = IS_BILLING ? await import('./abrechnung.js') : null;
@@ -1013,7 +1013,7 @@ const articleByArtNr = (nr) => (nr ? store.findArticleByNr(nr) || store.articles
 
 /** Ziel-Artikel: per Artikelnummer gefunden, gewählter vorhandener oder null (= neu anlegen). */
 function impTarget() {
-  return articleByArtNr(imp.d.artNr) || (imp.choice ? store.getArticle(imp.choice) : null) || null;
+  return articleByArtNr(imp.d.artNr) || (imp.choice && imp.choice !== 'neu' ? store.getArticle(imp.choice) : null) || null;
 }
 
 /** Vorhandene Artikel ohne Nummer, nach Anzahl passender Materialien sortiert. */
@@ -1071,12 +1071,14 @@ function impArticleBox(target) {
     <div class="field">
       <label for="imp-choice">Artikelnummer ${esc(d.artNr || '–')} ist noch unbekannt</label>
       <select id="imp-choice" class="input">
-        <option value="">Neuen Artikel anlegen</option>
+        <option value="" disabled${imp.choice ? '' : ' selected'}>Bitte wählen …</option>
+        <option value="neu"${imp.choice === 'neu' ? ' selected' : ''}>Neuen Artikel anlegen</option>
         ${opts ? `<optgroup label="Vorhandenem Artikel die Nummer geben">${opts}</optgroup>` : ''}
       </select>
       ${!imp.choice && cands[0]?.hits >= 2 ? `<p class="hint">Vorschlag: <b>${esc(cands[0].a.name)}</b> hat schon ${cands[0].hits} dieser Materialien – evtl. derselbe Artikel.</p>` : ''}
     </div>
-    ${target ? `<p class="hint">„${esc(target.name)}“ bekommt die Artikelnummer ${esc(d.artNr)}.</p>${diff(target)}` : `
+    ${target ? `<p class="hint">„${esc(target.name)}“ bekommt die Artikelnummer ${esc(d.artNr)}.</p>${diff(target)}`
+    : imp.choice !== 'neu' ? `<p class="hint">Neuen Artikel anlegen oder einem vorhandenen Artikel die Artikelnummer geben – „${esc(d.name)}“.</p>` : `
       ${field({ id: 'imp-name', label: 'Artikelbezeichnung', value: imp.form?.name ?? d.name, attrs: 'autocomplete="off" autocorrect="off" spellcheck="false"' })}
       <div class="two-col">
         ${field({ id: 'imp-artnr', label: 'Artikelnummer', value: imp.form?.artNr ?? d.artNr, attrs: CODE_ATTRS })}
@@ -1125,9 +1127,8 @@ function viewOrderImport() {
             if (!d.nr && !d.artNr && !d.bom.length) throw new Error('In diesem PDF wurde keine Bestellung erkannt (kein Auftrag, kein Artikel, keine Stückliste).');
             const thumbs = await Promise.all(d.plans.map((p) => pdfThumb(bytes, p.pages[0]).catch(() => '')));
             imp = { fileName: file.name, bytes, numPages: t.numPages, d, thumbs, choice: '', picked: { mat: {}, plan: {} }, form: null };
-            const cands = impCandidates();
-            if (!impTarget() && cands[0]?.hits >= 3) imp.choice = cands[0].a.id; // ziemlich sicher derselbe Artikel
-            render();
+            render(); // Artikel wird nur per Artikelnummer automatisch gewählt, sonst wählt man selbst
+
           } catch (ex) {
             err.textContent = ex.message || String(ex);
             drop.classList.remove('is-busy');
@@ -1210,6 +1211,7 @@ function viewOrderImport() {
           let art = impTarget();
           let artFields = null;
           if (!art) {
+            if (imp.choice !== 'neu') throw new Error('Bitte beim Artikel wählen: neuen Artikel anlegen oder einem vorhandenen die Artikelnummer geben.');
             const name = String(f.name || '').trim();
             const artNr = String(f.artNr || '').trim();
             if (!name) throw new Error('Bitte eine Artikelbezeichnung eingeben.');
