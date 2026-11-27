@@ -986,3 +986,27 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 36px;
 .imp-thumb { width: 48px; height: 48px; flex: none; border-radius: 8px; border: 1px solid var(--line); object-fit: cover; object-position: top;
   display: inline-flex; align-items: center; justify-content: center; color: var(--muted); background: #fff; }
 .imp-thumb svg { width: 22px; height: 22px; }
+
+/* ---------- E-Rechnung lesbar anzeigen ---------- */
+.xr-box { margin: 4px 0 16px; padding: 12px 10px 4px; border: 1.5px dashed var(--line-strong); border-radius: var(--radius); }
+.xr-view .section-title:first-child { margin-top: 0; }
+.xr-head { padding: 14px 16px 2px; }
+.xr-title { margin: 2px 0 10px; font-size: 22px; font-weight: 800; line-height: 1.2; overflow-wrap: anywhere; }
+.xr-check { margin-bottom: 12px; }
+.xr-view .kv small { display: block; font-size: 13px; }
+@media (max-width: 420px) {
+  .xr-box { padding: 10px 6px 2px; }
+  .xr-view .kv { flex-direction: column; gap: 1px; }
+  .xr-view .kv > span:first-child { flex-basis: auto; font-size: 13px; }
+}
+.xr-lines td:first-child { overflow-wrap: anywhere; }
+.xr-notes { padding: 4px 16px; }
+.xr-notes p { margin: 8px 0; overflow-wrap: anywhere; }
+.xr-att { display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 16px; }
+.xr-att + .xr-att { border-top: 1px solid var(--line); }
+.xr-att-main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-wrap: anywhere; }
+.xr-att-main small { font-size: 13px; }
+.xr-raw { margin: 4px 0 12px; }
+.xr-raw summary { cursor: pointer; padding: 10px 4px; font-weight: 650; color: var(--primary); }
+.xr-raw pre { margin: 0; max-height: 420px; overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre; }

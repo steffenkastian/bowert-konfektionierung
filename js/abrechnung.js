@@ -5,7 +5,7 @@ import * as store from './store.js';
 import { $, $$, esc, plural, natCmp, toast } from './ui.js';
 import { renderPdf } from './files.js';
 import { invoicePdf, mergePdfs, PAYMENT_TEXT } from './rechnung.js';
-import { xrechnungXml, BUYER } from './xrechnung.js';
+import { xrechnungXml, readXrechnung, checkSums, CODE_TEXT, BUYER } from './xrechnung.js';
 import { loadFflate } from './umlagerung.js';
 
 let C = null; // Bausteine aus app.js
@@ -735,9 +735,128 @@ function mountEContact(root) {
   });
 }
 
+// ---------- E-Rechnung lesbar anzeigen ----------
+
+/** HTML aus den gelesenen XRechnung-Daten (readXrechnung). Zeigt, was wirklich in der Datei steht. */
+function xrechnungHtml(x, xml) {
+  const money = (n) => (n == null ? '–' : Number(n).toLocaleString('de-DE', { style: 'currency', currency: x.currency || 'EUR', minimumFractionDigits: 2 }));
+  const amount = (n) => (n == null ? '' : Number(n).toLocaleString('de-DE', { maximumFractionDigits: 4 }));
+  const day = (iso) => (iso ? C.fmtDay(iso) : '');
+  const code = (list, c) => CODE_TEXT[list][c] || (c ? `Code ${c}` : '');
+  const kv = (k, v) => (v ? `<div class="kv"><span>${esc(k)}</span><span>${v}</span></div>` : '');
+  const lines = (...xs) => xs.filter(Boolean).map(esc).join('<br>');
+  const addr = (a) => (a ? lines(a.street, a.extra, [a.zip, a.city].filter(Boolean).join(' '), a.country && a.country !== 'DE' ? a.country : '') : '');
+  const iban = (t) => t.replace(/(.{4})(?=.)/g, '$1 ');
+  const endpoint = (p) => (p.endpoint ? `${esc(p.endpoint)}<small class="muted">${esc(code('scheme', p.endpointScheme))}</small>` : '');
+  const party = (title, p) => (p ? `${C.sectionTitle(title, null)}
+    <div class="card kvs">
+      ${kv('Name', `<b>${esc(p.name)}</b>${p.legalName && p.legalName !== p.name ? `<small class="muted">${esc(p.legalName)}</small>` : ''}`)}
+      ${kv('Anschrift', addr(p.address))}
+      ${kv('USt-IdNr.', esc(p.vatId))}
+      ${kv('Steuernummer', esc(p.taxNo))}
+      ${kv('Register', esc(p.registerId))}
+      ${kv('Weitere Angaben', esc(p.legalInfo))}
+      ${p.contact ? kv('Ansprechpartner', lines(p.contact.name, p.contact.phone, p.contact.email)) : ''}
+      ${kv('Elektronische Adresse', endpoint(p))}
+    </div>` : '');
+  const problems = checkSums(x);
+  const title = `${code('type', x.typeCode) || (x.credit ? 'Gutschrift' : 'Rechnung')} Nr. ${x.id}`;
+  // Base64 der Anhänge im Quelltext kürzen
+  const raw = xml.replace(/(<cbc:EmbeddedDocumentBinaryObject[^>]*>)([^<]{120,})(<)/g,
+    (m, a, b, c) => `${a}${b.slice(0, 60)} … [${Math.round((b.length * 3) / 4 / 1024)} KB Anhang, Base64-kodiert] …${c}`);
+  return `
+    <div class="xr-view">
+      <div class="xr-head card">
+        <span class="eyebrow">E-Rechnung · ${/xrechnung_3/.test(x.customization) ? 'XRechnung 3.0' : 'EN 16931'}</span>
+        <div class="xr-title">${esc(title)}</div>
+        <p class="${problems.length ? 'notice' : 'notice notice-ok'} xr-check">${problems.length
+          ? `Rechenprüfung: ${problems.map(esc).join(' ')}`
+          : 'Rechenprüfung: Positionen, Steuer und Summen stimmen.'}</p>
+      </div>
+      <div class="card kvs">
+        ${kv('Rechnungsdatum', day(x.issueDate))}
+        ${kv('Fällig am', day(x.dueDate))}
+        ${x.period ? kv('Leistungszeitraum', `${day(x.period.start)} – ${day(x.period.end)}`) : ''}
+        ${kv('Lieferdatum', day(x.delivery?.date))}
+        ${kv('Käuferreferenz', esc(x.buyerRef))}
+        ${kv('Bestellnummer', esc(x.orderRef))}
+        ${x.billingRefs.map((b) => kv('Bezug auf Rechnung', `${esc(invNo(b.id))}${b.date ? ` vom ${day(b.date)}` : ''}`)).join('')}
+      </div>
+      ${party('Rechnungssteller', x.seller)}
+      ${party('Rechnungsempfänger', x.buyer)}
+      ${x.delivery && (x.delivery.name || x.delivery.address) ? `${C.sectionTitle('Lieferort', null)}
+        <div class="card kvs">${kv('Lieferung an', lines(x.delivery.name) + (x.delivery.address ? `<br>${addr(x.delivery.address)}` : ''))}</div>` : ''}
+      ${C.sectionTitle('Positionen', x.lines.length)}
+      <div class="card table-card"><table class="tbl xr-lines">
+        <thead><tr><th>Bezeichnung</th><th class="num">Menge</th><th class="num">Betrag</th></tr></thead>
+        <tbody>${x.lines.map((l) => `<tr>
+          <td><b>${esc(l.id)}.</b> ${esc(l.name)}
+            ${l.description ? `<small>${esc(l.description)}</small>` : ''}
+            ${l.buyerItemId ? `<small>Artikelnummer Kunde: ${esc(l.buyerItemId)}</small>` : ''}
+            ${l.sellerItemId ? `<small>Eigene Artikelnummer: ${esc(l.sellerItemId)}</small>` : ''}
+            <small>${l.price != null ? `${esc(priceText(l.price))} je ${esc(code('unit', l.unit) || 'Einheit')}` : ''}${l.taxPercent != null ? ` · USt ${esc(amount(l.taxPercent))} %` : ''}</small></td>
+          <td class="num">${esc(amount(l.qty))}<small>${esc(code('unit', l.unit))}</small></td>
+          <td class="num">${money(l.amount)}</td></tr>`).join('')}</tbody></table></div>
+      ${C.sectionTitle('Summen', null)}
+      <div class="card kvs">
+        ${kv('Summe Positionen', money(x.totals.lines))}
+        ${x.totals.allowances ? kv('Nachlässe', money(x.totals.allowances)) : ''}
+        ${x.totals.charges ? kv('Zuschläge', money(x.totals.charges)) : ''}
+        ${kv('Netto', money(x.totals.net))}
+        ${x.taxes.map((t) => kv(`USt ${amount(t.percent)} % (${code('tax', t.category)})`, `${money(t.amount)}<small class="muted">auf ${money(t.taxable)}</small>`)).join('')}
+        ${kv('Brutto', money(x.totals.gross))}
+        ${x.totals.prepaid ? kv('Bereits bezahlt', money(x.totals.prepaid)) : ''}
+        ${kv(x.credit ? 'Gutschriftsbetrag' : 'Zahlbetrag', `<b>${money(x.totals.payable)}</b>`)}
+      </div>
+      ${x.payment.length || x.terms ? `${C.sectionTitle('Zahlung', null)}
+        <div class="card kvs">
+          ${x.payment.map((p) => kv(code('means', p.code) || p.name || 'Zahlungsart',
+            p.iban ? lines(iban(p.iban), p.bic ? `BIC ${p.bic}` : '', p.accountName ? `Inhaber: ${p.accountName}` : '') : (p.name && p.name !== code('means', p.code) ? esc(p.name) : '–'))).join('')}
+          ${kv('Bedingungen', esc(x.terms))}
+        </div>` : ''}
+      ${x.notes.length ? `${C.sectionTitle('Bemerkungen', null)}
+        <div class="card xr-notes">${x.notes.map((n) => `<p>${esc(n)}</p>`).join('')}</div>` : ''}
+      ${x.attachments.length ? `${C.sectionTitle('Anhänge', x.attachments.length)}
+        <div class="card list">${x.attachments.map((a, i) => `<div class="xr-att">
+          <div class="xr-att-main"><b>${esc(a.filename)}</b><small class="muted">${esc([a.description, a.base64 ? `${Math.round((a.base64.length * 3) / 4 / 1024)} KB` : 'nur Verweis'].filter(Boolean).join(' · '))}</small></div>
+          ${a.base64 && a.mime === 'application/pdf' ? `<button type="button" class="btn btn-secondary btn-small" data-att="${i}">Ansehen</button>` : ''}
+        </div>`).join('')}</div>
+        <div id="xr-att-box" class="file-view is-pdf" hidden></div>` : ''}
+      <details class="xr-raw">
+        <summary>XML-Quelltext anzeigen</summary>
+        <pre>${esc(raw)}</pre>
+      </details>
+    </div>`;
+}
+
+/** Anhang (PDF) aus der XML anzeigen. */
+function mountXrechnung(box, x, isAlive) {
+  const attBox = $('#xr-att-box', box);
+  box.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-att]');
+    if (!b) return;
+    const a = x.attachments[Number(b.dataset.att)];
+    const open = attBox.hidden || attBox.dataset.att !== b.dataset.att;
+    $$('[data-att]', box).forEach((o) => { o.textContent = 'Ansehen'; });
+    attBox.hidden = !open;
+    if (!open) return;
+    b.textContent = 'Schließen';
+    attBox.dataset.att = b.dataset.att;
+    attBox.innerHTML = '<div class="loading"><span class="spinner"></span>Anhang wird geladen …</div>';
+    try {
+      const bin = atob(a.base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      attBox.innerHTML = '';
+      await renderPdf(new Blob([bytes], { type: 'application/pdf' }), attBox, isAlive);
+    } catch (ex) { attBox.innerHTML = `<p class="empty-inline pad">${esc(ex.message)}</p>`; }
+  });
+}
+
 // ---------- Eine Rechnung ----------
 
 let previewInv = null;
+let xmlPreviewInv = null;
 
 function viewInvoice(id) {
   const inv = store.getInvoice(id);
@@ -773,11 +892,13 @@ function viewInvoice(id) {
         <tbody>${inv.items.map((i) => `<tr><td>${esc(i.text)}<small>${priceText(i.price)} pro Satz</small></td>
           <td class="num">${C.fmtN(i.qty)}</td><td class="num">${eur(i.total)}</td></tr>`).join('')}</tbody></table></div>
       <button type="button" class="btn btn-primary btn-block" id="download">${C.icon.download}<span>PDF herunterladen${storno ? '' : ` (mit ${plural(inv.deliveries.length, 'Lieferschein', 'Lieferscheinen')})`}</span></button>
-      ${contactOf(inv)
-        ? `<button type="button" class="btn btn-secondary btn-block" id="xml">${C.icon.download}<span>E-Rechnung (XRechnung) herunterladen</span></button>`
-        : `<p class="notice notice-soft">E-Rechnung (XRechnung): Ansprechpartner fehlt – <a href="#/rechnungen">unter „Rechnungen“ eintragen</a>.</p>`}
-      <button type="button" class="btn btn-secondary btn-block" id="preview">${previewInv === inv.id ? 'Vorschau schließen' : 'Vorschau'}</button>
+      <button type="button" class="btn btn-secondary btn-block" id="preview">${previewInv === inv.id ? 'PDF-Vorschau schließen' : 'PDF-Vorschau'}</button>
       <div id="pdf-box" class="file-view is-pdf" ${previewInv === inv.id ? '' : 'hidden'}></div>
+      ${contactOf(inv)
+        ? `<button type="button" class="btn btn-secondary btn-block" id="xml">${C.icon.download}<span>E-Rechnung (XRechnung) herunterladen</span></button>
+          <button type="button" class="btn btn-secondary btn-block" id="xml-preview">${xmlPreviewInv === inv.id ? 'E-Rechnung schließen' : 'E-Rechnung ansehen'}</button>
+          <div id="xml-box" class="xr-box" ${xmlPreviewInv === inv.id ? '' : 'hidden'}></div>`
+        : `<p class="notice notice-soft">E-Rechnung (XRechnung): Ansprechpartner fehlt – <a href="#/rechnungen">unter „Rechnungen“ eintragen</a>.</p>`}
       ${C.sectionTitle('Lieferscheine', inv.deliveries.length)}
       <ul class="card list">${inv.deliveries.map((r) => C.row({
         href: `#/lieferschein/${r.id}`,
@@ -810,8 +931,28 @@ function viewInvoice(id) {
       $('#preview', root).addEventListener('click', (e) => {
         previewInv = previewInv === inv.id ? null : inv.id;
         box.hidden = previewInv !== inv.id;
-        e.currentTarget.textContent = previewInv === inv.id ? 'Vorschau schließen' : 'Vorschau';
+        e.currentTarget.textContent = previewInv === inv.id ? 'PDF-Vorschau schließen' : 'PDF-Vorschau';
         if (previewInv === inv.id) showPreview();
+      });
+      // E-Rechnung ansehen: die erzeugte XML wird wieder eingelesen und lesbar angezeigt
+      const xbox = $('#xml-box', root);
+      const showXml = async () => {
+        xbox.innerHTML = '<div class="loading"><span class="spinner"></span>E-Rechnung wird erstellt …</div>';
+        try {
+          const file = await invoiceXmlFile(inv);
+          const xml = await file.text();
+          if (C.currentView() !== view) return;
+          const x = readXrechnung(xml);
+          xbox.innerHTML = xrechnungHtml(x, xml);
+          mountXrechnung(xbox, x, () => C.currentView() === view);
+        } catch (ex) { xbox.innerHTML = `<p class="empty-inline pad">${esc(ex.message)}</p>`; }
+      };
+      if (xbox && xmlPreviewInv === inv.id) showXml();
+      $('#xml-preview', root)?.addEventListener('click', (e) => {
+        xmlPreviewInv = xmlPreviewInv === inv.id ? null : inv.id;
+        xbox.hidden = xmlPreviewInv !== inv.id;
+        e.currentTarget.textContent = xmlPreviewInv === inv.id ? 'E-Rechnung schließen' : 'E-Rechnung ansehen';
+        if (xmlPreviewInv === inv.id) showXml();
       });
       $('#download', root).addEventListener('click', async (e) => {
         const btn = e.currentTarget;

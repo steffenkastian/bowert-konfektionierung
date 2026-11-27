@@ -237,3 +237,132 @@ export function xrechnungXml(inv, { contact, pdf, pdfName = 'Rechnung.pdf', refD
 </ubl:${root}>
 `;
 }
+
+// ======================================================================
+// Lesen: XRechnung (UBL Invoice / CreditNote) → einfache Daten für die Vorschau
+// ======================================================================
+
+/** Kinder-Elemente nach lokalem Namen (Namensräume egal). */
+const kids = (el, name) => (el ? [...el.children].filter((c) => c.localName === name) : []);
+/** Pfad aus lokalen Namen, z. B. at(party, 'PostalAddress', 'CityName') */
+const at = (el, ...path) => path.reduce((e, n) => kids(e, n)[0] || null, el);
+const val = (el, ...path) => at(el, ...path)?.textContent.trim() || '';
+const numv = (el, ...path) => { const t = val(el, ...path); return t === '' ? null : Number(t); };
+
+function readParty(p) {
+  if (!p) return null;
+  const addr = at(p, 'PostalAddress');
+  const taxSchemes = kids(p, 'PartyTaxScheme').map((t) => ({ id: val(t, 'CompanyID'), scheme: val(t, 'TaxScheme', 'ID') }));
+  return {
+    name: val(p, 'PartyName', 'Name') || val(p, 'PartyLegalEntity', 'RegistrationName'),
+    legalName: val(p, 'PartyLegalEntity', 'RegistrationName'),
+    endpoint: val(p, 'EndpointID'),
+    endpointScheme: at(p, 'EndpointID')?.getAttribute('schemeID') || '',
+    address: addr ? {
+      street: val(addr, 'StreetName'), extra: val(addr, 'AdditionalStreetName'),
+      zip: val(addr, 'PostalZone'), city: val(addr, 'CityName'), country: val(addr, 'Country', 'IdentificationCode'),
+    } : null,
+    vatId: taxSchemes.find((t) => t.scheme === 'VAT')?.id || '',
+    taxNo: taxSchemes.find((t) => t.scheme !== 'VAT')?.id || '',
+    registerId: val(p, 'PartyLegalEntity', 'CompanyID'),
+    legalInfo: val(p, 'PartyLegalEntity', 'CompanyLegalForm'),
+    contact: at(p, 'Contact')
+      ? { name: val(p, 'Contact', 'Name'), phone: val(p, 'Contact', 'Telephone'), email: val(p, 'Contact', 'ElectronicMail') }
+      : null,
+  };
+}
+
+/** XML-Text → Daten. Wirft einen Fehler, wenn es keine UBL-Rechnung/-Gutschrift ist. */
+export function readXrechnung(xmlText) {
+  const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
+  if (doc.getElementsByTagName('parsererror').length) throw new Error('Die Datei ist kein gültiges XML.');
+  const r = doc.documentElement;
+  if (!['Invoice', 'CreditNote'].includes(r.localName)) throw new Error('Keine XRechnung im UBL-Format (Invoice/CreditNote).');
+  const credit = r.localName === 'CreditNote';
+  const delivery = at(r, 'Delivery');
+  const dAddr = at(delivery, 'DeliveryLocation', 'Address');
+  const total = at(r, 'LegalMonetaryTotal');
+  return {
+    credit,
+    customization: val(r, 'CustomizationID'),
+    typeCode: val(r, credit ? 'CreditNoteTypeCode' : 'InvoiceTypeCode'),
+    id: val(r, 'ID'),
+    issueDate: val(r, 'IssueDate'),
+    dueDate: val(r, 'DueDate') || val(r, 'PaymentMeans', 'PaymentDueDate'),
+    currency: val(r, 'DocumentCurrencyCode') || 'EUR',
+    notes: kids(r, 'Note').map((n) => n.textContent.trim()).filter(Boolean),
+    buyerRef: val(r, 'BuyerReference'),
+    period: at(r, 'InvoicePeriod') ? { start: val(r, 'InvoicePeriod', 'StartDate'), end: val(r, 'InvoicePeriod', 'EndDate') } : null,
+    orderRef: val(r, 'OrderReference', 'ID'),
+    billingRefs: kids(r, 'BillingReference').map((b) => ({ id: val(b, 'InvoiceDocumentReference', 'ID'), date: val(b, 'InvoiceDocumentReference', 'IssueDate') })),
+    attachments: kids(r, 'AdditionalDocumentReference').map((a) => {
+      const obj = at(a, 'Attachment', 'EmbeddedDocumentBinaryObject');
+      return {
+        id: val(a, 'ID'), description: val(a, 'DocumentDescription'),
+        filename: obj?.getAttribute('filename') || val(a, 'ID'), mime: obj?.getAttribute('mimeCode') || '',
+        base64: obj ? obj.textContent.replace(/\s+/g, '') : '',
+      };
+    }),
+    seller: readParty(at(r, 'AccountingSupplierParty', 'Party')),
+    buyer: readParty(at(r, 'AccountingCustomerParty', 'Party')),
+    delivery: delivery ? {
+      date: val(delivery, 'ActualDeliveryDate'),
+      name: val(delivery, 'DeliveryParty', 'PartyName', 'Name'),
+      address: dAddr ? { street: val(dAddr, 'StreetName'), zip: val(dAddr, 'PostalZone'), city: val(dAddr, 'CityName'), country: val(dAddr, 'Country', 'IdentificationCode') } : null,
+    } : null,
+    payment: kids(r, 'PaymentMeans').map((m) => ({
+      code: val(m, 'PaymentMeansCode'), name: at(m, 'PaymentMeansCode')?.getAttribute('name') || '',
+      iban: val(m, 'PayeeFinancialAccount', 'ID'), accountName: val(m, 'PayeeFinancialAccount', 'Name'),
+      bic: val(m, 'PayeeFinancialAccount', 'FinancialInstitutionBranch', 'ID'), reference: val(m, 'PaymentID'),
+    })),
+    terms: val(r, 'PaymentTerms', 'Note'),
+    taxAmount: numv(r, 'TaxTotal', 'TaxAmount'),
+    taxes: kids(at(r, 'TaxTotal'), 'TaxSubtotal').map((t) => ({
+      taxable: numv(t, 'TaxableAmount'), amount: numv(t, 'TaxAmount'),
+      category: val(t, 'TaxCategory', 'ID'), percent: numv(t, 'TaxCategory', 'Percent'),
+      reason: val(t, 'TaxCategory', 'TaxExemptionReason'),
+    })),
+    totals: {
+      lines: numv(total, 'LineExtensionAmount'), net: numv(total, 'TaxExclusiveAmount'), gross: numv(total, 'TaxInclusiveAmount'),
+      allowances: numv(total, 'AllowanceTotalAmount'), charges: numv(total, 'ChargeTotalAmount'),
+      prepaid: numv(total, 'PrepaidAmount'), payable: numv(total, 'PayableAmount'),
+    },
+    lines: kids(r, credit ? 'CreditNoteLine' : 'InvoiceLine').map((l) => {
+      const q = at(l, credit ? 'CreditedQuantity' : 'InvoicedQuantity');
+      return {
+        id: val(l, 'ID'), note: val(l, 'Note'),
+        qty: q ? Number(q.textContent) : null, unit: q?.getAttribute('unitCode') || '',
+        amount: numv(l, 'LineExtensionAmount'),
+        name: val(l, 'Item', 'Name'), description: val(l, 'Item', 'Description'),
+        buyerItemId: val(l, 'Item', 'BuyersItemIdentification', 'ID'), sellerItemId: val(l, 'Item', 'SellersItemIdentification', 'ID'),
+        price: numv(l, 'Price', 'PriceAmount'),
+        taxCategory: val(l, 'Item', 'ClassifiedTaxCategory', 'ID'), taxPercent: numv(l, 'Item', 'ClassifiedTaxCategory', 'Percent'),
+      };
+    }),
+  };
+}
+
+/** Rechenprüfung der gelesenen Daten (nur Summen – die vollständige Prüfung macht der KoSIT-Validator). */
+export function checkSums(x) {
+  const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+  const problems = [];
+  const lineSum = r2(x.lines.reduce((s, l) => s + (l.amount || 0), 0));
+  if (x.totals.lines != null && lineSum !== r2(x.totals.lines)) problems.push(`Summe der Positionen (${lineSum}) passt nicht zur Nettosumme (${x.totals.lines}).`);
+  if (x.totals.gross != null && r2((x.totals.net ?? 0) + (x.taxAmount || 0)) !== r2(x.totals.gross)) problems.push('Netto + USt ergibt nicht den Bruttobetrag.');
+  for (const t of x.taxes) {
+    if (t.percent != null && t.taxable != null && t.amount != null && r2(t.taxable * t.percent / 100) !== r2(t.amount)) {
+      problems.push(`USt ${t.percent} % von ${t.taxable} ergibt nicht ${t.amount}.`);
+    }
+  }
+  if (x.totals.payable != null && x.totals.gross != null && r2(x.totals.gross - (x.totals.prepaid || 0)) !== r2(x.totals.payable)) problems.push('Der Zahlbetrag passt nicht zum Bruttobetrag.');
+  return problems;
+}
+
+/** Klartext zu den Codes der Norm */
+export const CODE_TEXT = {
+  type: { 380: 'Rechnung', 381: 'Gutschrift', 384: 'Rechnungskorrektur', 326: 'Teilrechnung', 389: 'Gutschrift (Selbstfakturierung)', 875: 'Teilschlussrechnung', 876: 'Teilrechnung', 877: 'Schlussrechnung' },
+  unit: { SET: 'Satz', C62: 'Stück', H87: 'Stück', EA: 'Stück', XPP: 'Stück', KGM: 'kg', MTR: 'm', LTR: 'l', HUR: 'Std.', DAY: 'Tag(e)', LS: 'pauschal', MON: 'Monat(e)' },
+  means: { 1: 'nicht festgelegt', 10: 'bar', 30: 'Überweisung', 31: 'Überweisung', 42: 'Zahlung auf Bankkonto', 48: 'Karte', 49: 'Lastschrift', 57: 'Dauerauftrag', 58: 'SEPA-Überweisung', 59: 'SEPA-Lastschrift', 97: 'Verrechnung', ZZZ: 'vereinbart' },
+  tax: { S: 'Normalsatz', Z: 'Nullsatz', E: 'steuerbefreit', AE: 'Steuerschuldnerschaft des Leistungsempfängers', K: 'innergemeinschaftliche Lieferung', G: 'Ausfuhr', O: 'nicht steuerbar' },
+  scheme: { EM: 'E-Mail', '0204': 'Leitweg-ID', 9930: 'USt-IdNr.' },
+};
