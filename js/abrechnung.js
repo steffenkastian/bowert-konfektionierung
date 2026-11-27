@@ -774,8 +774,7 @@ function viewInvoice(id) {
           <td class="num">${C.fmtN(i.qty)}</td><td class="num">${eur(i.total)}</td></tr>`).join('')}</tbody></table></div>
       <button type="button" class="btn btn-primary btn-block" id="download">${C.icon.download}<span>PDF herunterladen${storno ? '' : ` (mit ${plural(inv.deliveries.length, 'Lieferschein', 'Lieferscheinen')})`}</span></button>
       ${contactOf(inv)
-        ? `<button type="button" class="btn btn-secondary btn-block" id="xml">${C.icon.download}<span>E-Rechnung (XRechnung) herunterladen</span></button>
-          <p class="hint center xml-hint">XML-Datei per E-Mail an <b>${esc(BUYER.email)}</b> – die PDF steckt darin.</p>`
+        ? `<button type="button" class="btn btn-secondary btn-block" id="xml">${C.icon.download}<span>E-Rechnung (XRechnung) herunterladen</span></button>`
         : `<p class="notice notice-soft">E-Rechnung (XRechnung): Ansprechpartner fehlt – <a href="#/rechnungen">unter „Rechnungen“ eintragen</a>.</p>`}
       <button type="button" class="btn btn-secondary btn-block" id="preview">${previewInv === inv.id ? 'Vorschau schließen' : 'Vorschau'}</button>
       <div id="pdf-box" class="file-view is-pdf" ${previewInv === inv.id ? '' : 'hidden'}></div>
@@ -833,7 +832,7 @@ function viewInvoice(id) {
         btn.innerHTML = '<span class="spinner small"></span><span>E-Rechnung wird erstellt …</span>';
         try {
           const file = await invoiceXmlFile(inv);
-          await C.shareOrDownload(file, { title: file.name.replace(/\.xml$/, '') });
+          C.downloadFile(file); // nur herunterladen, nicht teilen (wird vom Laptop aus verschickt)
         } catch (ex) {
           if (ex.name !== 'AbortError') toast(`E-Rechnung fehlgeschlagen: ${ex.message}`, 'error');
         } finally { if (btn.isConnected) { btn.disabled = false; btn.innerHTML = label; } }
