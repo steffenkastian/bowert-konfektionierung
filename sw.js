@@ -2,7 +2,7 @@
 // Gilt für beide Apps: Konfektionierung (./) und Abrechnung (./abrechnung/).
 // Die Daten selbst cacht Firebase (Firestore-Offline-Cache) – Anfragen an Firebase laufen hier nicht durch.
 // Bei jeder neuen Version CACHE hochzählen, damit installierte Apps die neuen Dateien laden.
-const CACHE = 'konf-v21';
+const CACHE = 'konf-v22';
 const FIREBASE = 'https://www.gstatic.com/firebasejs/10.12.2/';
 const ASSETS = [
   './',
@@ -17,6 +17,7 @@ const ASSETS = [
   './js/umlagerung.js',
   './js/abrechnung.js',
   './js/rechnung.js',
+  './js/xrechnung.js',
   './js/bestellung.js',
   './manifest.webmanifest',
   './abrechnung/',

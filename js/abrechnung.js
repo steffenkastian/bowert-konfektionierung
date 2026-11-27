@@ -5,6 +5,7 @@ import * as store from './store.js';
 import { $, $$, esc, plural, natCmp, toast } from './ui.js';
 import { renderPdf } from './files.js';
 import { invoicePdf, mergePdfs, PAYMENT_TEXT } from './rechnung.js';
+import { xrechnungXml, BUYER } from './xrechnung.js';
 import { loadFflate } from './umlagerung.js';
 
 let C = null; // Bausteine aus app.js
@@ -393,8 +394,10 @@ function viewInvoices() {
           sub: esc(`${inv.orderNrs.length === 1 ? `Auftrag ${inv.orderNrs[0]}` : `${inv.orderNrs.length} Aufträge`} · ${C.fmtDay(inv.date)} · ${eur(inv.brutto)}`),
           tag: STATUS_TAG(inv),
         })).join('')}</ul>`).join('')
-        : `${C.sectionTitle('Archiv', 0)}<p class="hint">Noch keine Rechnungen erstellt.</p>`}</div>`,
+        : `${C.sectionTitle('Archiv', 0)}<p class="hint">Noch keine Rechnungen erstellt.</p>`}</div>
+      ${eContactCard()}`,
     mount(root) {
+      mountEContact(root);
       // am eigenen Container (nicht an #main), sonst sammeln sich beim Neuzeichnen alte Klick-Handler an
       $('#inv-archive', root).addEventListener('click', async (e) => {
         const b = e.target.closest('[data-zip]');
@@ -471,6 +474,8 @@ function viewInvoiceNew(query) {
         Der Lieferschein bekommt das Datum, an dem er erstellt wird: <a href="#/lieferscheine">Lieferscheine</a></p>` : ''}
       ${blocked.length ? `<p class="notice">${plural(blocked.length, 'Auftrag wird', 'Aufträge werden')} übersprungen – Preis fehlt:
         ${[...new Map(blocked.map((b) => [b.article?.id, b.article])).values()].map((a) => (a ? `<a href="#/artikel/${a.id}">${esc(a.name)}</a>` : 'ohne Artikel')).join(', ')}</p>` : ''}
+      ${batches.length && !store.eContact() ? `<p class="notice notice-soft">Für die E-Rechnung (XRechnung) fehlt noch der Ansprechpartner –
+        es werden nur PDFs erstellt. <a href="#/rechnungen">Unter „Rechnungen“ eintragen</a></p>` : ''}
       ${batches.length ? `
         ${C.sectionTitle('Je Auftrag eine Rechnung', batches.length)}
         <div class="card pick-list" id="pick">
@@ -537,7 +542,10 @@ function viewInvoiceNew(query) {
         const btn = $('#create', root);
         btn.disabled = !list.length;
         btn.innerHTML = `${C.icon.check}<span>${list.length === 1 ? 'Rechnung erstellen & herunterladen' : `${list.length || ''} Rechnungen erstellen & als ZIP herunterladen`}</span>`;
-        $('#create-hint', root).textContent = list.length ? `Je Rechnung eine PDF: Rechnung + Lieferscheine des Auftrags.` : 'Bitte mindestens einen Auftrag auswählen.';
+        $('#create-hint', root).textContent = !list.length ? 'Bitte mindestens einen Auftrag auswählen.'
+          : store.eContact()
+            ? `Je Rechnung eine PDF (Rechnung + Lieferscheine des Auftrags) und die E-Rechnung (XRechnung, XML).${list.length === 1 ? ' Die E-Rechnung gibt es danach an der Rechnung.' : ''}`
+            : 'Je Rechnung eine PDF: Rechnung + Lieferscheine des Auftrags.';
       };
       $('#pick', root).addEventListener('change', (e) => {
         if (e.target.id === 'all') $$('[data-o]', root).forEach((c) => { if (!c.disabled) c.checked = e.target.checked; });
@@ -648,7 +656,28 @@ async function invoiceFile(inv) {
   return new File([bytes], fileName(inv), { type: 'application/pdf' });
 }
 
-/** Mehrere Rechnungen (je eine PDF mit Lieferscheinen) als ZIP. */
+// ---------- E-Rechnung (XRechnung) ----------
+
+const contactOf = (inv) => inv.contact || store.eContact();
+const NO_CONTACT = 'Für die E-Rechnung fehlt der Ansprechpartner – bitte unter „Rechnungen“ eintragen.';
+
+/** XRechnung (XML) mit eingebetteter PDF. pdfFile = invoiceFile(inv), falls schon erzeugt. */
+async function invoiceXmlFile(inv, pdfFile = null) {
+  const contact = contactOf(inv);
+  if (!contact) throw new Error(NO_CONTACT);
+  const pdf = pdfFile || await invoiceFile(inv);
+  const ref = inv.refNo ? store.getInvoice(inv.refNo) : null;
+  const xml = xrechnungXml(inv, {
+    contact,
+    pdf: new Uint8Array(await pdf.arrayBuffer()),
+    pdfName: pdf.name,
+    refDate: ref?.date || '',
+    artNrOf: (it) => store.getArticle(it.articleId)?.artNr || '',
+  });
+  return new File([xml], pdf.name.replace(/\.pdf$/, '.xml'), { type: 'application/xml' });
+}
+
+/** Mehrere Rechnungen als ZIP: je Rechnung die PDF (mit Lieferscheinen) und – mit Ansprechpartner – die XRechnung. */
 async function zipInvoices(invs, name, onProgress = () => {}) {
   const fflate = await loadFflate();
   const entries = {};
@@ -656,8 +685,54 @@ async function zipInvoices(invs, name, onProgress = () => {}) {
     onProgress(i + 1);
     const f = await invoiceFile(invs[i]);
     entries[f.name] = [new Uint8Array(await f.arrayBuffer()), { level: 0 }];
+    if (contactOf(invs[i])) {
+      const x = await invoiceXmlFile(invs[i], f);
+      entries[x.name] = [new Uint8Array(await x.arrayBuffer()), { level: 6 }];
+    }
   }
   return new File([fflate.zipSync(entries)], name, { type: 'application/zip' });
+}
+
+// ---------- E-Rechnung: Ansprechpartner (Übersicht „Rechnungen“) ----------
+
+let eContactEdit = false;
+
+function eContactCard() {
+  const c = store.eContact();
+  const open = eContactEdit || !c;
+  return `${C.sectionTitle('E-Rechnung (XRechnung)', null, c && !open ? '<button type="button" class="link-btn" id="ec-edit">Ändern</button>' : '')}
+    <div class="card kvs" id="ec-card">
+      ${c && !open ? `<div class="kv"><span>Ansprechpartner</span><span>${esc(c.name)}<br><small class="muted">${esc(c.phone)} · ${esc(c.email)}</small></span></div>` : ''}
+      <div class="kv"><span>Empfänger</span><span>${esc(BUYER.name)}<br><small class="muted">${esc(BUYER.email)}</small></span></div>
+    </div>
+    ${open ? `<form class="card form" id="ec-form" novalidate>
+      ${c ? '' : '<p class="hint" style="margin-top:0">Pflichtangabe in jeder XRechnung: wer bei BO-WERT für Rückfragen zur Rechnung da ist. Wird nur hier gespeichert (nicht im Programmcode).</p>'}
+      ${C.field({ id: 'ec-name', label: 'Ansprechpartner', value: c?.name || '', attrs: 'autocomplete="name"' })}
+      <div class="two-col">
+        ${C.field({ id: 'ec-phone', label: 'Telefon', value: c?.phone || '', attrs: 'type="tel" inputmode="tel" autocomplete="tel"' })}
+        ${C.field({ id: 'ec-email', label: 'E-Mail', value: c?.email || '', attrs: 'type="email" inputmode="email" autocomplete="email"' })}
+      </div>
+      <p class="form-error" id="ec-err" role="alert"></p>
+      <button class="btn btn-primary btn-block" type="submit">${C.icon.check}<span>Speichern</span></button>
+      ${c ? '<button type="button" class="btn btn-secondary btn-block" id="ec-cancel">Abbrechen</button>' : ''}
+    </form>` : ''}`;
+}
+
+function mountEContact(root) {
+  $('#ec-edit', root)?.addEventListener('click', () => { eContactEdit = true; C.rerender(); });
+  $('#ec-cancel', root)?.addEventListener('click', () => { eContactEdit = false; C.rerender(); });
+  $('#ec-form', root)?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const was = eContactEdit;
+    eContactEdit = false; // vor dem Speichern: die Änderung zeichnet die Seite neu
+    try {
+      store.saveEContact({ name: $('#ec-name', root).value, phone: $('#ec-phone', root).value, email: $('#ec-email', root).value });
+      toast('Ansprechpartner gespeichert');
+    } catch (ex) {
+      eContactEdit = was;
+      $('#ec-err', root).textContent = ex.message;
+    }
+  });
 }
 
 // ---------- Eine Rechnung ----------
@@ -698,6 +773,10 @@ function viewInvoice(id) {
         <tbody>${inv.items.map((i) => `<tr><td>${esc(i.text)}<small>${priceText(i.price)} pro Satz</small></td>
           <td class="num">${C.fmtN(i.qty)}</td><td class="num">${eur(i.total)}</td></tr>`).join('')}</tbody></table></div>
       <button type="button" class="btn btn-primary btn-block" id="download">${C.icon.download}<span>PDF herunterladen${storno ? '' : ` (mit ${plural(inv.deliveries.length, 'Lieferschein', 'Lieferscheinen')})`}</span></button>
+      ${contactOf(inv)
+        ? `<button type="button" class="btn btn-secondary btn-block" id="xml">${C.icon.download}<span>E-Rechnung (XRechnung) herunterladen</span></button>
+          <p class="hint center xml-hint">XML-Datei per E-Mail an <b>${esc(BUYER.email)}</b> – die PDF steckt darin.</p>`
+        : `<p class="notice notice-soft">E-Rechnung (XRechnung): Ansprechpartner fehlt – <a href="#/rechnungen">unter „Rechnungen“ eintragen</a>.</p>`}
       <button type="button" class="btn btn-secondary btn-block" id="preview">${previewInv === inv.id ? 'Vorschau schließen' : 'Vorschau'}</button>
       <div id="pdf-box" class="file-view is-pdf" ${previewInv === inv.id ? '' : 'hidden'}></div>
       ${C.sectionTitle('Lieferscheine', inv.deliveries.length)}
@@ -745,6 +824,18 @@ function viewInvoice(id) {
           await C.shareOrDownload(file, { title: file.name.replace(/\.pdf$/, '') });
         } catch (ex) {
           if (ex.name !== 'AbortError') toast(`PDF fehlgeschlagen: ${ex.message}`, 'error');
+        } finally { if (btn.isConnected) { btn.disabled = false; btn.innerHTML = label; } }
+      });
+      $('#xml', root)?.addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        const label = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner small"></span><span>E-Rechnung wird erstellt …</span>';
+        try {
+          const file = await invoiceXmlFile(inv);
+          await C.shareOrDownload(file, { title: file.name.replace(/\.xml$/, '') });
+        } catch (ex) {
+          if (ex.name !== 'AbortError') toast(`E-Rechnung fehlgeschlagen: ${ex.message}`, 'error');
         } finally { if (btn.isConnected) { btn.disabled = false; btn.innerHTML = label; } }
       });
       $('#storno-open', root)?.addEventListener('click', (e) => {

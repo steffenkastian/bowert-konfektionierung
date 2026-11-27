@@ -45,6 +45,7 @@ und zusätzlich:
 | **Preise** | Am Artikel: Nettopreis pro Satz mit **gültig ab**. Frühere Lieferungen behalten ihren alten Preis; Preise, die schon abgerechnet sind, lassen sich nicht mehr rückwirkend ändern. Unter **Preise → Alle Preise erhöhen**: Prozent + Stichtag, Vorschau „bisher → neu“, gilt für alle Artikel mit Preis (Basis: Preis am Vortag, 4 Nachkommastellen), mit Rückgängig. |
 | **Rechnungen** | Zeitraum wählen (Monate mit offenen Lieferscheinen stehen oben). **Je Auftrag eine Rechnung**: Aufträge an-/abwählen, Aufträge ohne Preis werden übersprungen. Erste Nummer prüfen, die weiteren laufen fortlaufend in der Reihenfolge der Aufträge. Je Rechnung eine PDF (Rechnung im Layout von `pdf.py`, dahinter genau die archivierten Lieferscheine); mehrere kommen als **ZIP**. Im Archiv (nach Monat) gibt es je Monat „ZIP“ zum erneuten Herunterladen. Der Nummernkreis wird auch für andere Rechnungen benutzt – Nummern bitte prüfen. |
 | **Storno** | An der Rechnung: erzeugt eine Stornorechnung (eigene Nummer, negative Beträge); die Lieferscheine werden wieder frei. |
+| **E-Rechnung** | Jede Rechnung gibt es zusätzlich als **XRechnung 3.0 (UBL-XML)**, die PDF (Rechnung + Lieferscheine) ist eingebettet. Download an der Rechnung („E-Rechnung (XRechnung) herunterladen“), im ZIP liegt sie neben der PDF. Empfänger-Adresse: `630invoices@eppendorf.de`, Käuferreferenz = Bestellnummer, Eppendorf-Artikelnummer je Position. Stornorechnung → XRechnung-Gutschrift (381) mit Verweis auf die Rechnung. Der **Ansprechpartner** (Pflichtangabe) wird unter „Rechnungen“ eingetragen und nur in `billing/settings` gespeichert, nicht im Code; jede neue Rechnung friert ihn ein. Geprüft mit dem KoSIT-Validator (XRechnung 3.0.2). |
 
 Abgerechnete Lieferscheine sind **gesperrt** (keine Einträge, kein Löschen) – auch in der Datenbank-Regel.
 Gespeichert wird: `prices/{Artikel}`, `invoices/{Nummer}` (eingefrorene Positionen, Summen, Lieferscheine mit Fassung),
@@ -81,6 +82,7 @@ js/lieferschein.js     Lieferschein-PDF (Nachbau der Word-Vorlage, Koordinaten a
 js/umlagerung.js       Umlagerungsschein: füllt die Excel-Vorlage auf XML-Ebene aus (Rest bleibt unverändert)
 js/abrechnung.js       Abrechnung: Umsatz-Dashboard, Preise, Rechnungen (nur in /abrechnung/ geladen)
 js/rechnung.js         Rechnungs-PDF (Nachbau von pdf.py) + Zusammenfügen mit den Lieferscheinen
+js/xrechnung.js        E-Rechnung: XRechnung 3.0 (UBL) mit eingebetteter PDF
 abrechnung/            Einstieg der Abrechnungs-App (index.html, Manifest, Logo für die Rechnung)
 vendor/pdf-lib/        pdf-lib 1.17.1 (MIT) zum Zusammenfügen von PDFs
 vendor/pdfjs/          pdf.js 4.10.38 (Mozilla, Apache-2.0) zum Anzeigen von PDFs

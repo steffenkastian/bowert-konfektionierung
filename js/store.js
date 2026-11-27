@@ -38,7 +38,7 @@
 //   prices/{articleId}  { list: [{ from: 'JJJJ-MM-TT', price }] }   Nettopreis pro Satz ab Datum
 //   invoices/{nr}       Rechnung bzw. Storno mit eingefrorenen Daten (Positionen, Summen, Lieferscheine + Fassung)
 //   invoicePdfs/{nr}    { pdf: Bytes }  die erstellte Rechnung; die Lieferscheine kommen aus dem Archiv dahinter
-//   billing/settings    { nextInvoiceNo }
+//   billing/settings    { nextInvoiceNo, eContact: { name, phone, email } }  (Ansprechpartner der E-Rechnung)
 // Abgerechnete Lieferscheine tragen invoice: { id, no } und sind gesperrt (auch in den Regeln).
 
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
@@ -1064,7 +1064,7 @@ export function buildInvoice(list) {
     const price = articleId ? priceAt(articleId, d.date) : null;
     if (price == null) { missing.set(articleId || d.id, getArticle(articleId)?.name || n.text || `Lieferschein ${d.no}`); continue; }
     const key = `${articleId}|${price}`;
-    const g = groups.get(key) || { articleId, text: n.text, price, qty: 0 };
+    const g = groups.get(key) || { articleId, artNr: getArticle(articleId)?.artNr || '', text: n.text, price, qty: 0 };
     g.qty += n.qty;
     groups.set(key, g);
   }
@@ -1102,9 +1102,11 @@ export async function createInvoice({ no, date, from, to, list, extraLine = '', 
     const n = noteData(d);
     return { id: d.id, v: l.v, no: d.no, date: d.date, qty: n.qty, pallets: n.pallets, orderNr: n.orderNr, bestellnr: n.bestellnr };
   }).sort((a, b) => String(a.no).localeCompare(String(b.no)));
+  const contact = eContact();
   const invoice = {
     no, type: 'rechnung', status: 'gueltig', date, from, to, ...calc,
     extraLine: str(extraLine), note: str(note), deliveries: refs, createdAt: now(),
+    ...(contact ? { contact } : {}), // Ansprechpartner der E-Rechnung einfrieren
   };
   const invRef = doc(db, 'invoices', no);
   await runTransaction(db, async (tx) => {
@@ -1141,6 +1143,7 @@ export async function cancelInvoice(id, { no, date }) {
     netto: neg(orig.netto), ust: neg(orig.ust), brutto: neg(orig.brutto),
     lieferdatum: orig.lieferdatum, orderNrs: orig.orderNrs, bestellnrs: orig.bestellnrs,
     extraLine: '', note: '', deliveries: orig.deliveries, createdAt: now(),
+    ...(eContact() ? { contact: eContact() } : {}),
   };
   const sRef = doc(db, 'invoices', no);
   await runTransaction(db, async (tx) => {
@@ -1164,6 +1167,27 @@ export async function cancelInvoice(id, { no, date }) {
   }
   emit();
   return data.invoices.get(no);
+}
+
+// ---------- E-Rechnung: Ansprechpartner ----------
+
+/** Ansprechpartner für die XRechnung (Name, Telefon, E-Mail) – steht nur in Firestore, nicht im Code. */
+export function eContact() {
+  const c = data.billing?.get('settings')?.eContact;
+  return c?.name && c?.phone && c?.email ? { name: c.name, phone: c.phone, email: c.email } : null;
+}
+
+export function saveEContact({ name, phone, email }) {
+  const c = { name: str(name), phone: str(phone), email: str(email).toLowerCase() };
+  if (!c.name) throw new Error('Bitte den Namen eintragen.');
+  if (c.phone.replace(/\D/g, '').length < 6) throw new Error('Bitte eine Telefonnummer eintragen.');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(c.email)) throw new Error('Bitte eine gültige E-Mail-Adresse eintragen.');
+  const p = setDoc(doc(db, 'billing', 'settings'), { eContact: c, updatedAt: now() }, { merge: true });
+  run(p);
+  const s = data.billing.get('settings') || {};
+  data.billing.set('settings', { ...s, eContact: c });
+  emit();
+  return c;
 }
 
 /** PDF der Rechnung (nur die Rechnungsseiten) ablegen / laden. */
